@@ -14,8 +14,8 @@ General-purpose: Works with any marketplace HTML structure.
 import json
 import os
 import random
-import time
 import re
+import time
 import urllib.parse
 import argparse
 import requests
@@ -30,6 +30,9 @@ from termcolor import colored
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 8118
 TOR_SOCKS_PORT = 9050
+
+# Browser/session behaviour
+SESSION_WARMUP_SECONDS = 60
 
 # Input/Output files
 PAGES_URL_FILE = "pages_url.json"
@@ -124,8 +127,12 @@ def extract_product_links(html, base_url):
             href = link.get('href')
             if href:
                 full_url = urllib.parse.urljoin(base_url, href)
-                # Only add if it's NOT a category page
-                if '/product-category/' not in full_url and '/category/' not in full_url:
+                # Only add if it's NOT a category page and not the listing page itself
+                if (
+                    '/product-category/' not in full_url
+                    and '/category/' not in full_url
+                    and full_url.rstrip('/') != base_url.rstrip('/')
+                ):
                     product_links.add(full_url)
     
     # If we found products via WooCommerce selectors, return them
@@ -138,9 +145,16 @@ def extract_product_links(html, base_url):
     for link in all_links:
         href = link['href']
         full_url = urllib.parse.urljoin(base_url, href)
+
+        # Detect BlackOps-style UUID product URLs explicitly
+        if '/product/' in full_url.lower():
+            path = urllib.parse.urlparse(full_url).path
+            if re.search(r'/product/[0-9a-f-]{36}', path, re.IGNORECASE):
+                product_links.add(full_url)
+                continue
         
         # Must match product indicators
-        product_indicators = ['/shop/', '/item/', '/listing/', '/p/']
+        product_indicators = ['/shop/', '/item/', '/listing/', '/p/', '/product/']
         
         # Must NOT match excluded patterns  
         excluded_patterns = [
@@ -152,10 +166,12 @@ def extract_product_links(html, base_url):
         has_product_indicator = any(indicator in full_url.lower() for indicator in product_indicators)
         has_excluded = any(pattern in full_url.lower() for pattern in excluded_patterns)
         
-        if has_product_indicator and not has_excluded:
+        if (
+            has_product_indicator
+            and not has_excluded
+            and full_url.rstrip('/') != base_url.rstrip('/')
+        ):
             product_links.add(full_url)
-    
-    return list(product_links)
     
     return list(product_links)
 
@@ -184,7 +200,7 @@ def scrape_category_page(session, category_url):
     html = fetch_page_html(session, category_url)
     if not html:
         print(colored(f"❌ Failed to fetch category page", "red"))
-        return []
+        return None, None
     
     product_links = extract_product_links(html, category_url)
     print(colored(f"✅ Found {len(product_links)} product links", "green"))
@@ -248,6 +264,10 @@ def main():
                        help='Delay between requests in seconds (default: 2)')
     parser.add_argument('--max-products', type=int, default=None,
                        help='Maximum number of products to scrape (default: unlimited)')
+    parser.add_argument('--session-wait', type=int, default=SESSION_WARMUP_SECONDS,
+                       help='Seconds to wait after opening a page before collecting cookies (default: 60)')
+    parser.add_argument('--disable-js', action='store_true',
+                       help='Disable JavaScript execution in the browser (Firefox preference)')
     
     args = parser.parse_args()
     
@@ -263,14 +283,22 @@ def main():
     
     # Initialize browser for CAPTCHA solving
     driver = None
-    try:
-        # Setup Firefox with proxy
+    host_sessions = {}
+    all_products = []
+    scraped_urls = set()
+    last_host = None
+
+    def ensure_driver():
+        nonlocal driver
+        if driver is not None:
+            return driver
+
         options = Options()
         if args.tor_binary:
             options.binary_location = args.tor_binary
-        
+
         options.set_preference("network.proxy.type", 1)
-        
+
         if args.socks:
             options.set_preference("network.proxy.socks", PROXY_HOST)
             options.set_preference("network.proxy.socks_port", args.socks_port)
@@ -280,46 +308,66 @@ def main():
             options.set_preference("network.proxy.http_port", PROXY_PORT)
             options.set_preference("network.proxy.ssl", PROXY_HOST)
             options.set_preference("network.proxy.ssl_port", PROXY_PORT)
-        
+
         options.set_preference("network.proxy.no_proxies_on", "")
-        
+
+        if args.disable_js:
+            # Disabling JS can help avoid heavy pages or scripts that detect automation.
+            options.set_preference("javascript.enabled", False)
+
         driver = webdriver.Firefox(options=options)
         driver.set_page_load_timeout(args.page_timeout)
-        
-        # Open first category URL for session establishment
-        first_url = category_urls[0]
-        print(colored(f"\n🌐 Opening: {first_url}", "blue"))
-        
+        return driver
+
+    def establish_session(target_url, reason):
+        nonlocal driver
+        parsed_url = urllib.parse.urlparse(target_url)
+        host = parsed_url.netloc
+        if host in host_sessions:
+            return host_sessions[host]
+
+        driver = ensure_driver()
+
         try:
-            driver.get(first_url)
+            driver.delete_all_cookies()
+        except Exception:
+            pass
+
+        print(colored(f"\n🌐 Opening ({reason}): {target_url}", "blue"))
+
+        try:
+            driver.get(target_url)
         except TimeoutException:
             try:
                 driver.execute_script("window.stop();")
             except Exception:
                 pass
             print(colored("⏱️  Page load timed out, continuing...", "yellow"))
-        
-        print(colored("⏳ Waiting 60 seconds to establish session...", "yellow"))
-        time.sleep(60)
-        
-        # Manual CAPTCHA solving
+
+        if args.session_wait > 0:
+            print(colored(f"⏳ Waiting {args.session_wait} seconds before collecting cookies...", "yellow"))
+            time.sleep(args.session_wait)
+
         if args.manual:
-            print(colored("\n🔐 Manual mode: Please solve any CAPTCHA in the browser.", "yellow", attrs=['bold']))
-            input(colored("   Press Enter when ready to continue...", "yellow"))
-        
-        # Extract cookies
-        cookies = extract_cookies(driver, do_quit=True)
-        driver = None
-        
-        print(colored(f"✅ Session established, extracted {len(cookies)} cookies", "green"))
-        
-        # Setup requests session
+            print(colored("\n🔐 Manual step: Please solve any CAPTCHA in the browser.", "yellow", attrs=['bold']))
+            print(colored("   Leave the browser open. When the page works in Requests too, press Enter here.", "yellow"))
+            input(colored("   Press Enter to continue...", "yellow"))
+
+        cookies = extract_cookies(driver, do_quit=False)
         session = setup_requests_session(cookies, args.socks, args.socks_port)
-        
-        # Scrape all categories
-        all_products = []
-        scraped_urls = set()
-        
+        host_sessions[host] = session
+
+        print(colored(f"✅ Session ready for {host} (cookies captured: {len(cookies)})", "green"))
+        return session
+
+    def refresh_session(target_url, reason):
+        parsed_url = urllib.parse.urlparse(target_url)
+        host = parsed_url.netloc
+        if host in host_sessions:
+            del host_sessions[host]
+        return establish_session(target_url, reason)
+
+    try:
         for category_url in category_urls:
             print(colored(f"\n{'='*80}", "cyan"))
             print(colored(f"CATEGORY: {category_url}", "cyan", attrs=['bold']))
@@ -329,8 +377,25 @@ def main():
             parsed = urllib.parse.urlparse(category_url)
             market_name = parsed.netloc
             
+            if market_name not in host_sessions:
+                reason = "new marketplace detected" if host_sessions else "initial session setup"
+                session = establish_session(category_url, reason)
+            else:
+                if market_name != last_host:
+                    print(colored(f"🔁 Switching back to existing session for {market_name}", "blue"))
+                session = host_sessions[market_name]
+            last_host = market_name
+            
             # Scrape category page (no pagination - only the given URL)
             product_links, _ = scrape_category_page(session, category_url)
+            if product_links is None:
+                print(colored("⚠️  Retrying after refreshing session...", "yellow"))
+                session = refresh_session(category_url, "retry after failed fetch")
+                product_links, _ = scrape_category_page(session, category_url)
+                if product_links is None:
+                    print(colored("❌ Skipping category due to repeated fetch failures", "red", attrs=['bold']))
+                    continue
+
             all_product_links = set(product_links)
             
             print(colored(f"\n📊 Products found on this page: {len(all_product_links)}", "green", attrs=['bold']))
@@ -346,8 +411,15 @@ def main():
                     break
                 
                 print(colored(f"  [{i}/{len(all_product_links)}]", "white"), end=" ")
-                
-                product_data = scrape_product_page(session, product_url, category_url, market_name)
+
+                product_host = urllib.parse.urlparse(product_url).netloc or market_name
+                if product_host not in host_sessions:
+                    print(colored(f"\n🔄 New host detected for product ({product_host}). Opening browser...", "yellow"))
+                    product_session = establish_session(product_url, "product host session setup")
+                else:
+                    product_session = host_sessions[product_host]
+
+                product_data = scrape_product_page(product_session, product_url, category_url, product_host)
                 
                 if product_data:
                     all_products.append(product_data)
@@ -386,6 +458,11 @@ def main():
     
     finally:
         if driver:
+            if args.manual:
+                try:
+                    input(colored("\n👋 Press Enter once you're ready for the scraper to close Firefox...", "yellow"))
+                except EOFError:
+                    pass
             try:
                 driver.quit()
             except Exception:
