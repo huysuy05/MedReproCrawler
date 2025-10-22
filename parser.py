@@ -11,6 +11,14 @@ It handles different HTML structures and extracts:
 - Rating (if available)
 - Reviews (if available)
 - Drug description
+
+
+Hardcode marketplace name
+
+Add additional attributes
+- Number in stock
+- Category
+- Any other fields from different marketplaces (Countries ship from, etc)
 """
 
 import json
