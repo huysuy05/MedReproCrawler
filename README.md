@@ -99,4 +99,3 @@ Use this tool only for legitimate research or with appropriate authorization. Sc
 
 ---
 
-If you'd like, I can add a small helper script `gen_pages.py` to generate/append numeric page ranges into `pages_url.json` safely, or add examples showing how to add ranges for specific hosts.
