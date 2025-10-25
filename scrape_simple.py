@@ -57,16 +57,16 @@ def load_pages_urls():
         return []
 
 
-def save_products_html(products, overwrite=True):
-    """Save product HTML data to products_html.json"""
+def save_products_html(products, output_path, overwrite=True):
+    """Save product HTML data to the specified JSON file"""
     mode = 'w' if overwrite else 'a'
     
     try:
-        with open(PRODUCTS_HTML_FILE, mode, encoding='utf-8') as f:
+        with open(output_path, mode, encoding='utf-8') as f:
             json.dump(products, f, ensure_ascii=False, indent=2)
-        print(colored(f"✅ Saved {len(products)} products to {PRODUCTS_HTML_FILE}", "green"))
+        print(colored(f"✅ Saved {len(products)} products to {output_path}", "green"))
     except Exception as e:
-        print(colored(f"❌ Error saving to {PRODUCTS_HTML_FILE}: {e}", "red"))
+        print(colored(f"❌ Error saving to {output_path}: {e}", "red"))
 
 
 def extract_cookies(driver, do_quit=False):
@@ -280,6 +280,11 @@ def main():
     print(colored(f"\n🚀 Starting scraper...", "cyan", attrs=['bold']))
     print(colored(f"   Categories to scrape: {len(category_urls)}", "white"))
     print(colored(f"   Delay between requests: {args.delay}s", "white"))
+
+    run_timestamp = time.strftime("%Y%m%d_%H%M%S")
+    base_name, ext = os.path.splitext(PRODUCTS_HTML_FILE)
+    output_file = f"{base_name}_{run_timestamp}{ext or '.json'}"
+    print(colored(f"   Output file: {output_file}", "white"))
     
     # Initialize browser for CAPTCHA solving
     driver = None
@@ -439,17 +444,17 @@ def main():
         print(colored(f"💾 SAVING RESULTS", "cyan", attrs=['bold']))
         print(colored(f"{'='*80}", "cyan"))
         
-        save_products_html(all_products, overwrite=True)
+        save_products_html(all_products, output_file, overwrite=True)
         
         print(colored(f"\n✅ Scraping complete!", "green", attrs=['bold']))
         print(colored(f"   Total products scraped: {len(all_products)}", "green"))
-        print(colored(f"   Saved to: {PRODUCTS_HTML_FILE}", "green"))
+        print(colored(f"   Saved to: {output_file}", "green"))
         
     except KeyboardInterrupt:
         print(colored("\n\n⚠️  Scraping interrupted by user", "yellow"))
         if all_products:
             print(colored(f"💾 Saving {len(all_products)} products collected so far...", "yellow"))
-            save_products_html(all_products, overwrite=True)
+            save_products_html(all_products, output_file, overwrite=True)
     
     except Exception as e:
         print(colored(f"\n❌ Error: {e}", "red"))
