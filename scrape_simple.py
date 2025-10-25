@@ -308,6 +308,8 @@ def main():
             options.set_preference("network.proxy.socks", PROXY_HOST)
             options.set_preference("network.proxy.socks_port", args.socks_port)
             options.set_preference("network.proxy.socks_version", 5)
+            # Let Tor handle DNS lookups so .onion hosts resolve correctly.
+            options.set_preference("network.proxy.socks_remote_dns", True)
         else:
             options.set_preference("network.proxy.http", PROXY_HOST)
             options.set_preference("network.proxy.http_port", PROXY_PORT)
