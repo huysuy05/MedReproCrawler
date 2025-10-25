@@ -16,12 +16,12 @@ Example file:
 
 
 Also include more fields
-    1. Description
-    2. How much left are in stock
-    3. Possibly the reviews
-    4. The category of the product
-    5. Price table 
-    6. Extract title from listing page
+    1. Description (Done)
+    2. How much left are in stock ( Not Done)
+    3. Possibly the reviews (Done)
+    4. The category of the product (Done)
+    5. Price table (Done)
+    6. Extract title from listing page (Done)
 
 Use Beautiful Soup to parse HTML
 """
