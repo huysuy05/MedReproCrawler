@@ -97,8 +97,16 @@ def extract_market_name(soup):
     return ""
 
 
-def extract_drug_name(soup):
-    """Extract drug name from various possible selectors"""
+def extract_listing_title(soup):
+    """Extract listing title from h1.product_title.entry-title (emotive drugstore specific)"""
+    # First try the specific emotive drugstore selector
+    element = soup.select_one('h1.product_title.entry-title')
+    if element:
+        text = clean_text(element.get_text())
+        if text:
+            return text
+    
+    # Fallback to other selectors for other marketplaces
     selectors = [
         'h1.product_title',
         'h1.entry-title',
@@ -300,7 +308,7 @@ def parse_product_html(product_data):
         
         parsed_data = {
             "market_name": extract_market_name(soup),
-            "drug_name": extract_drug_name(soup),
+            "listing_title": extract_listing_title(soup),
             "price": extract_price(soup),
             "dosage": extract_dosage(soup),
             "rating": extract_rating(soup),
