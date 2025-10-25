@@ -19,6 +19,11 @@ Add additional attributes
 - Number in stock
 - Category
 - Any other fields from different marketplaces (Countries ship from, etc)
+- Vendor
+
+TODO
+1. Remove the data processing (eg. Splitting, stripping, etc) since we just want raw data
+2. Replace drug_name with listing title
 """
 
 import json
