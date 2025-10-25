@@ -1,5 +1,4 @@
 # Quick Start - Simplified Scraper
-# Quick Start - Simplified Scraper
 
 This repository contains a lightweight scraper that loads category pages (from `pages_url.json`), extracts product links and saves each product page's raw HTML for later parsing. The scraper is built around Selenium (to capture cookies / solve CAPTCHAs manually) and requests (for faster subsequent fetches).
 
