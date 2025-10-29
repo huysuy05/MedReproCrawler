@@ -5,25 +5,20 @@ HTML Parser for Drug Marketplace Data
 This parser extracts drug information from HTML scraped from various dark web marketplaces.
 It handles different HTML structures and extracts:
 - Market name
-- Drug name
+- Listing title
 - Price/price range
 - Dosage information
 - Rating (if available)
 - Reviews (if available)
 - Drug description
-
-
-Hardcode marketplace name
-
-Add additional attributes
 - Number in stock
-- Category
-- Any other fields from different marketplaces (Countries ship from, etc)
-- Vendor
 
 TODO
-1. Remove the data processing (eg. Splitting, stripping, etc) since we just want raw data
-2. Replace drug_name with listing title
+- Add additional attributes:
+  - Category (already added via category_page)
+  - Any other fields from different marketplaces (Countries ship from, etc)
+  - Vendor
+- Consider removing data processing (eg. Splitting, stripping, etc) to store raw data
 """
 
 import json
@@ -297,6 +292,84 @@ def extract_description(soup):
     return ""
 
 
+def extract_number_in_stocks(soup):
+    """Extract the number of items in stock from various possible locations"""
+    if not soup:
+        return ""
+    
+    # Pattern 1: Look for text patterns like "20000 in stock", "20000 in-stock", etc.
+    # Common patterns: "NUMBER in stock", "NUMBER available", "Stock: NUMBER", etc.
+    stock_patterns = [
+        r'(\d[\d,]*)\s+in\s+stock',
+        r'(\d[\d,]*)\s+in-stock',
+        r'(\d[\d,]*)\s+available',
+        r'stock[:\s]+(\d[\d,]*)',
+        r'quantity[:\s]+(\d[\d,]*)',
+        r'available[:\s]+(\d[\d,]*)',
+    ]
+    
+    # Get all text content
+    text_content = soup.get_text()
+    
+    for pattern in stock_patterns:
+        match = re.search(pattern, text_content, re.IGNORECASE)
+        if match:
+            stock_number = match.group(1).replace(',', '').strip()
+            if stock_number.isdigit():
+                return stock_number
+    
+    # Pattern 2: Look for elements with stock-related classes
+    stock_selectors = [
+        '.stock',
+        '.in-stock',
+        '[class*="stock"]',
+        '[class*="quantity"]',
+        '.product-stock',
+        '.stock-status',
+        'p.stock',
+        '.woocommerce-stock'
+    ]
+    
+    for selector in stock_selectors:
+        elements = soup.select(selector)
+        for element in elements:
+            text = clean_text(element.get_text())
+            if text:
+                # Look for numbers in the text
+                for pattern in stock_patterns:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        stock_number = match.group(1).replace(',', '').strip()
+                        if stock_number.isdigit():
+                            return stock_number
+                
+                # Also try to extract any number from the element text
+                numbers = re.findall(r'(\d[\d,]*)', text)
+                for num in numbers:
+                    num_clean = num.replace(',', '').strip()
+                    if num_clean.isdigit() and len(num_clean) > 0:
+                        # Check if surrounding context suggests it's a stock number
+                        if any(keyword in text.lower() for keyword in ['stock', 'available', 'quantity']):
+                            return num_clean
+    
+    # Pattern 3: Check for data attributes that might contain stock info
+    stock_attrs = soup.find_all(attrs={'data-stock': True})
+    if stock_attrs:
+        for elem in stock_attrs:
+            stock_value = elem.get('data-stock', '')
+            if stock_value and stock_value.isdigit():
+                return stock_value
+    
+    stock_attrs = soup.find_all(attrs={'data-quantity': True})
+    if stock_attrs:
+        for elem in stock_attrs:
+            quantity_value = elem.get('data-quantity', '')
+            if quantity_value and quantity_value.isdigit():
+                return quantity_value
+    
+    return ""
+
+
 def parse_product_html(product_data):
     """Parse a single product's HTML and extract all relevant information"""
     try:
@@ -314,6 +387,7 @@ def parse_product_html(product_data):
             "rating": extract_rating(soup),
             "review": extract_reviews(soup),
             "description": extract_description(soup),
+            "number_in_stocks": extract_number_in_stocks(soup),
             "original_url": product_data.get('product_url', ''),
             "category_page": product_data.get('category_page', ''),
             "fetched_at": product_data.get('fetched_at', '')
