@@ -81,8 +81,8 @@ def extract_cookies(driver, do_quit=False):
     return cookie_dict
 
 
-def setup_requests_session(cookies, use_socks=False, socks_port=9050):
-    """Setup requests session with cookies and proxy"""
+def setup_requests_session(cookies, use_socks=False, socks_port=9050, verify_ssl=True):
+    """Setup requests session with cookies, proxy, and TLS behaviour"""
     session = requests.Session()
     
     if use_socks:
@@ -100,6 +100,7 @@ def setup_requests_session(cookies, use_socks=False, socks_port=9050):
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; rv:102.0) Gecko/20100101 Firefox/102.0'
     })
+    session.verify = verify_ssl
     
     return session
 
@@ -268,6 +269,8 @@ def main():
                        help='Seconds to wait after opening a page before collecting cookies (default: 60)')
     parser.add_argument('--disable-js', action='store_true',
                        help='Disable JavaScript execution in the browser (Firefox preference)')
+    parser.add_argument('--insecure', action='store_true',
+                       help='Skip TLS certificate verification (useful for self-signed certs)')
     
     args = parser.parse_args()
     
@@ -280,6 +283,8 @@ def main():
     print(colored(f"\n🚀 Starting scraper...", "cyan", attrs=['bold']))
     print(colored(f"   Categories to scrape: {len(category_urls)}", "white"))
     print(colored(f"   Delay between requests: {args.delay}s", "white"))
+    if args.insecure:
+        print(colored("   WARNING: TLS verification disabled (--insecure)", "yellow"))
 
     run_timestamp = time.strftime("%Y%m%d_%H%M%S")
     base_name, ext = os.path.splitext(PRODUCTS_HTML_FILE)
@@ -361,7 +366,7 @@ def main():
             input(colored("   Press Enter to continue...", "yellow"))
 
         cookies = extract_cookies(driver, do_quit=False)
-        session = setup_requests_session(cookies, args.socks, args.socks_port)
+        session = setup_requests_session(cookies, args.socks, args.socks_port, verify_ssl=not args.insecure)
         host_sessions[host] = session
 
         print(colored(f"✅ Session ready for {host} (cookies captured: {len(cookies)})", "green"))

@@ -51,6 +51,7 @@ Options explained:
 - `--socks --socks-port 9050` — connect Firefox to Tor SOCKS5 (default tor port).
 - `--manual` — opens the browser for manual CAPTCHA solving / login and waits for you to press Enter.
 - `--disable-js` — disables JavaScript in Firefox (can speed up loads and reduce bot detection).
+- `--insecure` — disable TLS certificate verification (useful for markets with self-signed certs).
 - `--page-timeout <seconds>` — increase if pages load slowly over Tor.
 - `--session-wait <seconds>` — seconds to wait after opening a page before collecting cookies (default 60).
 
