@@ -51,7 +51,12 @@ def extract_market_name(soup):
     title = soup.find('title')
     if title:
         title_text = clean_text(title.get_text())
-        # Look for pattern: "Product Name – Marketplace Name"
+        
+        # Pattern for X Wave Market: "Product Name - THE X WAVE MARKET"
+        if ' - THE X WAVE MARKET' in title_text:
+            return "THE X WAVE MARKET"
+        
+        # Look for pattern: "Product Name – Marketplace Name" (em dash)
         if '–' in title_text:
             parts = title_text.split('–')
             if len(parts) > 1:
@@ -93,21 +98,30 @@ def extract_market_name(soup):
 
 
 def extract_listing_title(soup):
-    """Extract listing title from h1.product_title.entry-title (emotive drugstore specific)"""
-    # First try the specific emotive drugstore selector
-    element = soup.select_one('h1.product_title.entry-title')
-    if element:
-        text = clean_text(element.get_text())
-        if text:
-            return text
+    """Extract listing title from various h1 selectors for different marketplaces"""
+    # Try various h1 selectors for different marketplaces
+    h1_selectors = [
+        'h1.product_title.entry-title',  # Emotive drugstore
+        'h1.product-title.entry-title',  # X Wave Market
+        'h1.entry-title.product-title',  # X Wave Market (alternate order)
+        'h1.entry-title',                # X Wave Market, general
+        'h1.product_title',
+        'h1.product-title',
+        'h1[class*="product"][class*="title"]',
+    ]
+    
+    for selector in h1_selectors:
+        element = soup.select_one(selector)
+        if element:
+            text = clean_text(element.get_text())
+            if text:
+                return text
     
     # Fallback to other selectors for other marketplaces
     selectors = [
-        'h1.product_title',
-        'h1.entry-title',
-        'h1.product-title',
         'h1[class*="product"]',
         'h1[class*="title"]',
+        'h1',
         '.product-title',
         '.product-name',
         '.drug-name',
@@ -130,6 +144,29 @@ def extract_listing_title(soup):
 
 def extract_price(soup):
     """Extract price information from various possible selectors"""
+    prices = []
+    
+    # Priority 1: Look in summary section first (for X Wave Market and similar WooCommerce sites)
+    summary = soup.find(class_='summary')
+    if summary:
+        summary_price = summary.find(class_=lambda x: x and 'price' in str(x).lower())
+        if summary_price:
+            text = clean_text(summary_price.get_text())
+            if text and '$' in text:
+                price_matches = re.findall(r'\$[\d,]+\.?\d*', text)
+                if price_matches:
+                    # Filter out $0 if there are other prices
+                    non_zero_prices = [p for p in price_matches if p != '$0']
+                    if non_zero_prices:
+                        if len(non_zero_prices) == 1:
+                            return non_zero_prices[0]
+                        else:
+                            return f"{min(non_zero_prices)} - {max(non_zero_prices)}"
+                    elif price_matches:
+                        # If only $0 found, return it
+                        return price_matches[0]
+    
+    # Priority 2: General price selectors
     selectors = [
         '.price .woocommerce-Price-amount',
         '.price .amount',
@@ -139,8 +176,6 @@ def extract_price(soup):
         '[class*="price"]',
         '.woocommerce-Price-amount'
     ]
-    
-    prices = []
     
     for selector in selectors:
         elements = soup.select(selector)
@@ -152,13 +187,22 @@ def extract_price(soup):
                 prices.extend(price_matches)
     
     if prices:
-        # Remove duplicates and sort
+        # Remove duplicates and filter out $0 prices if there are others
         unique_prices = list(set(prices))
-        if len(unique_prices) == 1:
-            return unique_prices[0]
-        else:
-            # Return price range
-            return f"{min(unique_prices)} - {max(unique_prices)}"
+        non_zero_prices = [p for p in unique_prices if p != '$0']
+        
+        if non_zero_prices:
+            if len(non_zero_prices) == 1:
+                return non_zero_prices[0]
+            else:
+                # Return price range
+                return f"{min(non_zero_prices)} - {max(non_zero_prices)}"
+        elif unique_prices:
+            # If only $0 found, return it
+            if len(unique_prices) == 1:
+                return unique_prices[0]
+            else:
+                return f"{min(unique_prices)} - {max(unique_prices)}"
     
     return ""
 
