@@ -19,6 +19,7 @@ TODO
   - Any other fields from different marketplaces (Countries ship from, etc)
   - Vendor
   - (Maybe) Format the time crawled/parsed into a better format for easier analysis.
+  - More focused in contraceptives
 - Consider removing data processing (eg. Splitting, stripping, etc) to store raw data
 """
 
