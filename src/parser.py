@@ -462,7 +462,7 @@ def load_products_data(filename="products_html.json"):
         return []
 
 
-def save_parsed_data(parsed_products, filename="parsed_drugs.json"):
+def save_parsed_data(parsed_products, filename="../data/parsed_drugs.json"):
     """Save the parsed drug data to a new JSON file"""
     try:
         with open(filename, 'w', encoding='utf-8') as f:
@@ -509,7 +509,7 @@ def main():
     print(colored(f"\n✅ Parsing complete!", "green", attrs=['bold']))
     print(colored(f"   Successfully parsed: {len(parsed_products)} products", "green"))
     print(colored(f"   Failed to parse: {failed_count} products", "red" if failed_count > 0 else "green"))
-    print(colored(f"   Saved to: parsed_drugs.json", "green"))
+    print(colored(f"   Saved to: data/parsed_drugs.json", "green"))
 
 
 if __name__ == "__main__":

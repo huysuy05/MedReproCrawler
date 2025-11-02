@@ -35,8 +35,8 @@ TOR_SOCKS_PORT = 9050
 SESSION_WARMUP_SECONDS = 60
 
 # Input/Output files
-PAGES_URL_FILE = "pages_url.json"
-PRODUCTS_HTML_FILE = "products_html.json"
+PAGES_URL_FILE = "../data/pages_url.json"
+PRODUCTS_HTML_FILE = "../data/products_html.json"
 
 
 def load_pages_urls():
