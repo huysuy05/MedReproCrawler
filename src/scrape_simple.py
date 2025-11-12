@@ -18,6 +18,8 @@ import re
 import time
 import urllib.parse
 import argparse
+from pathlib import Path
+
 import requests
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
@@ -35,13 +37,15 @@ TOR_SOCKS_PORT = 9050
 SESSION_WARMUP_SECONDS = 60
 
 # Input/Output files
-PAGES_URL_FILE = "../data/pages_url.json"
-PRODUCTS_HTML_FILE = "../data/products_html.json"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = PROJECT_ROOT / "data"
+PAGES_URL_FILE = DATA_DIR / "pages_url.json"
+PRODUCTS_HTML_FILE = DATA_DIR / "products_html.json"
 
 
 def load_pages_urls():
     """Load category URLs from pages_url.json"""
-    if not os.path.exists(PAGES_URL_FILE):
+    if not PAGES_URL_FILE.exists():
         print(colored(f"❌ {PAGES_URL_FILE} not found!", "red"))
         print(colored(f"   Create it with category URLs, example:", "yellow"))
         print(colored(f'   ["http://marketplace.onion/category1/", "http://marketplace.onion/category2/"]', "yellow"))
@@ -153,9 +157,14 @@ def extract_product_links(html, base_url):
             if re.search(r'/product/[0-9a-f-]{36}', path, re.IGNORECASE):
                 product_links.add(full_url)
                 continue
+
+        # Torzon-style query endpoints
+        if 'products.php' in full_url.lower() and 'action=view' in full_url.lower():
+            product_links.add(full_url)
+            continue
         
         # Must match product indicators
-        product_indicators = ['/shop/', '/item/', '/listing/', '/p/', '/product/']
+        product_indicators = ['/shop/', '/item/', '/listing/', '/p/', '/product/', 'products.php?action=view']
         
         # Must NOT match excluded patterns  
         excluded_patterns = [
