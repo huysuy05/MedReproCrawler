@@ -8,4 +8,4 @@ brew services start tor
 brew services start privoxy
 
 # Run scrape.py
-python scrape_simple.py --socks --socks-port 9050 --manual --disable-js
+python src/scrape_simple.py --socks --socks-port 9050 --manual --disable-js
