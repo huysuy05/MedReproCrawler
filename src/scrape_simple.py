@@ -9,6 +9,9 @@ This scraper:
 4. Saves everything to products_html.json (overwrites each time)
 
 General-purpose: Works with any marketplace HTML structure.
+
+
+# If the marketplace limits, create a new account
 """
 
 import json
