@@ -283,6 +283,10 @@ def main():
                        help='Disable JavaScript execution in the browser (Firefox preference)')
     parser.add_argument('--insecure', action='store_true',
                        help='Skip TLS certificate verification (useful for self-signed certs)')
+    parser.add_argument('--keep-browser-open', action='store_true',
+                       help='Leave Firefox open at the end so you can see/solve CAPTCHAs if sessions refresh')
+    parser.add_argument('--max-pages-per-category', type=int, default=3,
+                       help='Follow pagination up to this many pages per category (0 = unlimited, 1 = first page only)')
     
     args = parser.parse_args()
     
@@ -410,50 +414,73 @@ def main():
                 session = host_sessions[market_name]
             last_host = market_name
             
-            # Scrape category page (no pagination - only the given URL)
-            product_links, _ = scrape_category_page(session, category_url)
-            if product_links is None:
-                print(colored("⚠️  Retrying after refreshing session...", "yellow"))
-                session = refresh_session(category_url, "retry after failed fetch")
-                product_links, _ = scrape_category_page(session, category_url)
-                if product_links is None:
-                    print(colored("❌ Skipping category due to repeated fetch failures", "red", attrs=['bold']))
-                    continue
+            # Crawl paginated category pages
+            pages_seen = set()
+            page_queue = [category_url]
+            pages_scraped = 0
+            page_limit = None if args.max_pages_per_category == 0 else args.max_pages_per_category
 
-            all_product_links = set(product_links)
-            
-            print(colored(f"\n📊 Products found on this page: {len(all_product_links)}", "green", attrs=['bold']))
-            
-            # Scrape each product page
-            for i, product_url in enumerate(all_product_links, 1):
-                if product_url in scraped_urls:
-                    print(colored(f"  ⏭️  Skipping duplicate: {product_url}", "yellow"))
-                    continue
-                
-                if args.max_products and len(all_products) >= args.max_products:
-                    print(colored(f"\n⚠️  Reached max products limit ({args.max_products})", "yellow"))
+            while page_queue:
+                if page_limit is not None and pages_scraped >= page_limit:
                     break
-                
-                print(colored(f"  [{i}/{len(all_product_links)}]", "white"), end=" ")
 
-                product_host = urllib.parse.urlparse(product_url).netloc or market_name
-                if product_host not in host_sessions:
-                    print(colored(f"\n🔄 New host detected for product ({product_host}). Opening browser...", "yellow"))
-                    product_session = establish_session(product_url, "product host session setup")
-                else:
-                    product_session = host_sessions[product_host]
+                current_page = page_queue.pop(0)
+                if current_page in pages_seen:
+                    continue
+                pages_seen.add(current_page)
 
-                product_data = scrape_product_page(product_session, product_url, category_url, product_host)
+                # Reuse the same session for the host
+                page_session = host_sessions.get(market_name) or session
+
+                product_links, pagination_links = scrape_category_page(page_session, current_page)
+                if product_links is None:
+                    print(colored("⚠️  Retrying after refreshing session...", "yellow"))
+                    page_session = refresh_session(current_page, "retry after failed fetch")
+                    product_links, pagination_links = scrape_category_page(page_session, current_page)
+                    if product_links is None:
+                        print(colored("❌ Skipping page due to repeated fetch failures", "red", attrs=['bold']))
+                        continue
+
+                # Add new pagination links to queue
+                for link in pagination_links or []:
+                    if link not in pages_seen:
+                        page_queue.append(link)
+
+                pages_scraped += 1
+
+                all_product_links = set(product_links)
+                print(colored(f"\n📊 Products found on this page: {len(all_product_links)} (page {pages_scraped})", "green", attrs=['bold']))
                 
-                if product_data:
-                    all_products.append(product_data)
-                    scraped_urls.add(product_url)
-                    print(colored(f"    ✅ Saved (total: {len(all_products)})", "green"))
-                else:
-                    print(colored(f"    ❌ Failed", "red"))
-                
-                # Delay between requests
-                time.sleep(args.delay + random.uniform(0, 1))
+                # Scrape each product page
+                for i, product_url in enumerate(all_product_links, 1):
+                    if product_url in scraped_urls:
+                        print(colored(f"  ⏭️  Skipping duplicate: {product_url}", "yellow"))
+                        continue
+                    
+                    if args.max_products and len(all_products) >= args.max_products:
+                        print(colored(f"\n⚠️  Reached max products limit ({args.max_products})", "yellow"))
+                        break
+                    
+                    print(colored(f"  [{i}/{len(all_product_links)}]", "white"), end=" ")
+
+                    product_host = urllib.parse.urlparse(product_url).netloc or market_name
+                    if product_host not in host_sessions:
+                        print(colored(f"\n🔄 New host detected for product ({product_host}). Opening browser...", "yellow"))
+                        product_session = establish_session(product_url, "product host session setup")
+                    else:
+                        product_session = host_sessions[product_host]
+
+                    product_data = scrape_product_page(product_session, product_url, current_page, product_host)
+                    
+                    if product_data:
+                        all_products.append(product_data)
+                        scraped_urls.add(product_url)
+                        print(colored(f"    ✅ Saved (total: {len(all_products)})", "green"))
+                    else:
+                        print(colored(f"    ❌ Failed", "red"))
+                    
+                    # Delay between requests
+                    time.sleep(args.delay + random.uniform(0, 1))
             
             if args.max_products and len(all_products) >= args.max_products:
                 break
@@ -481,7 +508,7 @@ def main():
         traceback.print_exc()
     
     finally:
-        if driver:
+        if driver and not args.keep_browser_open:
             if args.manual:
                 try:
                     input(colored("\n👋 Press Enter once you're ready for the scraper to close Firefox...", "yellow"))
@@ -491,6 +518,8 @@ def main():
                 driver.quit()
             except Exception:
                 pass
+        elif driver and args.keep_browser_open:
+            print(colored("\nℹ️  Leaving Firefox open (--keep-browser-open). Manually close it when done.", "yellow"))
 
 
 if __name__ == "__main__":
