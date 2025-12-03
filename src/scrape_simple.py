@@ -12,6 +12,18 @@ General-purpose: Works with any marketplace HTML structure.
 
 
 # If the marketplace limits, create a new account
+
+TODO for Torzon Crawling. 
+- Add a check if the string "Not calling you a bot,..." so we can refresh the crawl later.
+- If the string appears, save it in a txt file to recrawl later.
+- Only saves the successful product HTML pages.
+- Maybe reduce the crawl speed with a delay between requests.
+- Use time.sleep(random.randrange(20, 60)) to add delay between requests.
+
+Parser:
+- Add the listing posted date to the parsed drugs JSON.
+- If there is not a date, use the Python datetime library to get the current date.
+
 """
 
 import json
