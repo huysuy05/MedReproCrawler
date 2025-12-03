@@ -283,6 +283,8 @@ def main():
                        help='Disable JavaScript execution in the browser (Firefox preference)')
     parser.add_argument('--insecure', action='store_true',
                        help='Skip TLS certificate verification (useful for self-signed certs)')
+    parser.add_argument('--keep-browser-open', action='store_true',
+                       help='Leave Firefox open at the end so you can see/solve CAPTCHAs if sessions refresh')
     
     args = parser.parse_args()
     
@@ -481,7 +483,7 @@ def main():
         traceback.print_exc()
     
     finally:
-        if driver:
+        if driver and not args.keep_browser_open:
             if args.manual:
                 try:
                     input(colored("\n👋 Press Enter once you're ready for the scraper to close Firefox...", "yellow"))
@@ -491,6 +493,8 @@ def main():
                 driver.quit()
             except Exception:
                 pass
+        elif driver and args.keep_browser_open:
+            print(colored("\nℹ️  Leaving Firefox open (--keep-browser-open). Manually close it when done.", "yellow"))
 
 
 if __name__ == "__main__":
