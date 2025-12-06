@@ -390,7 +390,7 @@ def write_csv(products: Sequence[Dict[str, object]], headers: Sequence[str], out
 def parse_args() -> argparse.Namespace:
     project_root = Path(__file__).resolve().parents[1]
     default_input = project_root / "data" / "parsed_drugs.json"
-    default_output = project_root / "data" / "filtered_medicines.csv"
+    default_output = project_root / "data" / "filtered_medicines1.csv"
     parser = argparse.ArgumentParser(description="Filter parsed drugs for specified medicines and export to CSV.")
     parser.add_argument("--input", "-i", type=Path, default=default_input, help="Path to parsed_drugs.json")
     parser.add_argument("--output", "-o", type=Path, default=default_output, help="Destination CSV path")
