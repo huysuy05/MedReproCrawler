@@ -22,6 +22,7 @@ Also include more fields
     4. The category of the product (Done)
     5. Price table (Done)
     6. Extract title from listing page (Done)
+    7. Apply the filter to the rest of marketplaces. 
 
 Use Beautiful Soup to parse HTML
 """
