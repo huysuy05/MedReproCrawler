@@ -35,10 +35,7 @@ def main() -> None:
     if not filtered:
         print("No Torzon products matched the supplied medicine terms.")
         return
-    for product in filtered:
-        product.pop("matched_terms", None)
-        product.pop("matched_categories", None)
-    headers = [h for h in determine_columns(filtered) if h not in {"matched_terms", "matched_categories"}]
+    headers = determine_columns(filtered)
     write_csv(filtered, headers, args.output)
     print(f"Wrote {len(filtered)} Torzon products to {args.output}")
 

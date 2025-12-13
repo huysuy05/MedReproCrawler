@@ -10,38 +10,6 @@ from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
 # Terms grouped by category so the resulting CSV can show which families matched.
 TERM_GROUPS: Dict[str, Sequence[str]] = {
-    "abortion_meds": [
-        "Abortion",
-        "Methotrexate",
-        "Mifepristone",
-        "Mifeprex",
-        "Mifiprex",
-        "RU-486",
-        "Misoprostol",
-        "Cytotec",
-        "Dinoprostone",
-        "Prostaglandin E2",
-        "Prostin E2",
-        "Prepidil",
-        "Cervidil",
-        "Propess",
-        "Minprostin E2",
-        "Prostin",
-        "Prostarmon E",
-        "Glandin",
-        "Prostaglandin E",
-        "Cerviprime",
-        "Prostarmon E2",
-        "Medroxyprogesterone Acetate",
-        "Cyclofem",
-        "Lunelle",
-        "Dienogest",
-        "Climodien",
-        "Lafamme",
-        "Segesterone acetate",
-        "Elcometrine",
-        "Nestorone",
-    ],
     "contraceptives": [
         "Noracycline",
         "Marvelon",
@@ -75,7 +43,7 @@ TERM_GROUPS: Dict[str, Sequence[str]] = {
         "Kimidess",
         "Drospirenone",
         "Yasmin",
-        "Yasminelle",
+        "yasminelle",
         "Yaz",
         "Gianvi",
         "Vestura",
@@ -90,7 +58,7 @@ TERM_GROUPS: Dict[str, Sequence[str]] = {
         "Harmonet",
         "Ogen",
         "Ortho-Est",
-        "Piperazine estrone sulfate",
+        "piperazine estrone sulfate",
         "Sulestrex",
         "Pipestrone",
         "Ethynodiol Diacetate",
@@ -127,7 +95,7 @@ TERM_GROUPS: Dict[str, Sequence[str]] = {
         "NORDETTE",
         "LESSINA",
         "TRIVORA",
-        "Aless",
+        "aless",
         "Twirla",
         "Vienva",
         "OGESTREL",
@@ -185,7 +153,7 @@ TERM_GROUPS: Dict[str, Sequence[str]] = {
         "Tri-Lo-Estarylla",
         "Ortho Tri Lo",
         "Ortho Cyclen",
-        "Ethinylestradiol",
+        "ethinylestradiol",
         "MonoNessa",
         "Tri-lo-sprintec",
         "Microgynon",
@@ -248,6 +216,7 @@ TERM_GROUPS: Dict[str, Sequence[str]] = {
         "Microneth",
         "Estrinor",
         "Norethin",
+        "Triella",
         "Genora",
         "Nelova",
         "Nodiol",
@@ -275,6 +244,9 @@ TERM_GROUPS: Dict[str, Sequence[str]] = {
         "Morning after pill",
         "Paragard",
         "Intrauterine device",
+        "Norethindrone",
+        "Norgestrel",
+        "Segesterone",
         "Opill",
         "Progesterone",
         "Oestrogen",
@@ -290,11 +262,37 @@ TERM_GROUPS: Dict[str, Sequence[str]] = {
         "LNG",
         "Levnorgestrel",
     ],
-    "sildenafil": [
-        "Sildenafil", "Sildenafil Citrate", "Tadalafil", "Clomiphene",
-    ],
-    "hormonal": [
-        "Testosterone", "Dihydrotestosterone", "Estrace", "Premarin",
+    "abortion_meds": [
+        "Mifepristone",
+        "Mifeprex",
+        "Mifiprex",
+        "RU-486",
+        "Misoprostol",
+        "Cytotec",
+        "Dinoprostone",
+        "Prostaglandin E2",
+        "Prostin E2",
+        "Prepidil",
+        "Cervidil",
+        "Propess",
+        "Minprostin E2",
+        "Prostin",
+        "Prostarmon E",
+        "Glandin",
+        "Prostaglandin E",
+        "Cerviprime",
+        "Prostarmon E2",
+        "Medroxyprogesterone Acetate",
+        "Cyclofem",
+        "Lunelle",
+        "Dienogest",
+        "Climodien",
+        "Lafamme",
+        "Segesterone acetate",
+        "Elcometrine",
+        "Nestorone",
+        "Methotrexate",
+        "Abortion",
     ],
 }
 
@@ -330,20 +328,23 @@ def normalise_cell(value: object) -> str:
     return str(value)
 
 
+PREFERRED_HEADERS: List[str] = [
+    "market_name",
+    "listing_title",
+    "price",
+    "dosage",
+    "rating",
+    "review",
+    "description",
+    "number_in_stocks",
+    "original_url",
+    "category_page",
+    "fetched_at",
+]
+
+
 def determine_columns(products: Iterable[Dict[str, object]]) -> List[str]:
-    preferred = [
-        "market_name",
-        "listing_title",
-        "price",
-        "dosage",
-        "rating",
-        "review",
-        "description",
-        "number_in_stocks",
-        "original_url",
-        "category_page",
-        "fetched_at",
-    ]
+    preferred = list(PREFERRED_HEADERS)
     seen: Set[str] = set(preferred)
     extras: Set[str] = set()
     for product in products:
@@ -403,7 +404,10 @@ def main() -> None:
     patterns = build_patterns()
     filtered = filter_products(products, patterns)
     if not filtered:
-        print("No products matched the supplied medicine terms.")
+        # Write an empty file with standard headers to avoid stale data.
+        headers = list(PREFERRED_HEADERS)
+        write_csv([], headers, args.output)
+        print("No products matched the supplied medicine terms. Wrote empty CSV with headers.")
         return
     headers = determine_columns(filtered)
     write_csv(filtered, headers, args.output)
