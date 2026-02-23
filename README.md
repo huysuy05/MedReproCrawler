@@ -93,9 +93,5 @@ lsof -nP -iTCP -sTCP:LISTEN | grep -E '9050|9150'
 curl --socks5-hostname 127.0.0.1:9050 "http://<onion-host>/"
 ```
 
-## Notes on safety and legality
-
-Use this tool only for legitimate research or with appropriate authorization. Scraping marketplaces may violate terms of service or local law.
-
 ---
 
