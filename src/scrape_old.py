@@ -1,6 +1,9 @@
 
 
 """
+
+THIS IS THE OLD SCRIPT, PLEASE REFER TO THE SCRAPE_SIMPLE ONE. THIS IS ONLY FOR REFERENCE
+
 Manually explore the page to find potential page with the listing
 Take the url of the page that contains the listing and parse into the scraper
 store all the pages with the listing into a txt/json file
