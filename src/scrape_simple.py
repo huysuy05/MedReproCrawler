@@ -38,7 +38,7 @@ from pathlib import Path
 import requests
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from bs4 import BeautifulSoup
 from termcolor import colored
 
@@ -383,6 +383,14 @@ def main():
             except Exception:
                 pass
             print(colored("⏱️  Page load timed out, continuing...", "yellow"))
+        except WebDriverException as exc:
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+            print(colored(f"⚠️  Browser navigation failed for {target_url}", "yellow"))
+            print(colored(f"   {exc}", "yellow"))
+            print(colored("   Continuing so the session can still be captured.", "yellow"))
 
         if args.session_wait > 0:
             print(colored(f"⏳ Waiting {args.session_wait} seconds before collecting cookies...", "yellow"))

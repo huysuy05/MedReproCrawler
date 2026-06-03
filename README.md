@@ -44,14 +44,31 @@ forward-socks5t / 127.0.0.1:9050 .
 ```bash
 ./run.sh
 # or, directly:
-python3 scrape_simple.py --socks --socks-port 9050 --manual --disable-js
+python3 scrape_simple.py --socks --socks-port 9150 --manual --disable-js --insecure
 ```
 
 Options explained:
-- `--socks --socks-port 9050` — connect Firefox to Tor SOCKS5 (default tor port).
+- `--socks --socks-port 9150` — connect Firefox to Tor SOCKS5. Use `9050` for system Tor (Homebrew) or `9150` for Tor Browser's own Tor. See "Choosing the SOCKS port" below.
 - `--manual` — opens the browser for manual CAPTCHA solving / login and waits for you to press Enter.
 - `--disable-js` — disables JavaScript in Firefox (can speed up loads and reduce bot detection).
-- `--insecure` — disable TLS certificate verification (useful for markets with self-signed certs).
+- `--insecure` — disable TLS certificate verification. **Usually required**: most markets redirect to HTTPS and serve self-signed certs, which otherwise fail with `CERTIFICATE_VERIFY_FAILED`. Safe on `.onion` because the onion address itself provides authentication.
+
+## Choosing the SOCKS port (9050 vs 9150)
+
+System Tor (Homebrew, port `9050`) and Tor Browser's bundled Tor (port `9150`) are **separate Tor clients** with independent circuits and hidden-service descriptor caches. A `.onion` that times out through one can be perfectly reachable through the other.
+
+- If a site times out on `9050` but **loads fine in Tor Browser**, run the scraper with `--socks-port 9150` and keep Tor Browser open (port 9150 only exists while the Tor Browser app is running).
+- To sanity-check which port reaches a host, compare them directly:
+
+```bash
+# 9050 = system Tor, 9150 = Tor Browser's Tor
+curl -s -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+  --socks5-hostname 127.0.0.1:9050 --max-time 60 "http://<onion-host>/"
+curl -s -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+  --socks5-hostname 127.0.0.1:9150 --max-time 60 "http://<onion-host>/"
+```
+
+A `HTTP 000` / timeout means that Tor client currently can't route to the service; a `2xx`/`3xx` means it can. Restarting system Tor (`brew services restart tor`) sometimes clears a stuck `9050`.
 - `--page-timeout <seconds>` — increase if pages load slowly over Tor.
 - `--session-wait <seconds>` — seconds to wait after opening a page before collecting cookies (default 60).
 
@@ -78,12 +95,14 @@ Example (partial):
 
 ## Troubleshooting
 
-- If Firefox (Selenium) times out on `.onion` but Tor Browser opens the page, confirm a Tor SOCKS listener is running (9050 typically). Check:
+- If Firefox (Selenium) times out on `.onion` but Tor Browser opens the page, you are almost certainly on the wrong SOCKS port. Tor Browser uses its own Tor on `9150`, not system Tor on `9050`. Switch the scraper to `--socks-port 9150` (and keep Tor Browser open). See "Choosing the SOCKS port" above. First confirm a Tor SOCKS listener is running:
 
 ```bash
 pgrep -a tor || ps aux | grep -i tor | grep -v grep
 lsof -nP -iTCP -sTCP:LISTEN | grep -E '9050|9150'
 ```
+
+- `SSLError: CERTIFICATE_VERIFY_FAILED (self-signed certificate)` — the market redirected to HTTPS and serves a self-signed cert. Add `--insecure` to skip cert verification. This is expected and safe on `.onion` addresses.
 
 - If ports 9050/9051 are in use, that usually means Tor is already running (system tor or Tor Browser). Point the scraper at the running Tor instance (do not start a second Tor using the same ports).
 - If using Privoxy, verify the `forward-socks5t` line is present so Privoxy forwards to Tor.

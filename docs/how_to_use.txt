@@ -305,7 +305,10 @@ If tests fail, review logs:
 
 The scraper requires manual CAPTCHA solving on first run. Basic command:
 
-$ python scraper.py --socks --socks-port 9050 --manual
+$ python src/scrape_simple.py --socks --socks-port 9150 --manual --disable-js --insecure
+
+(Use --socks-port 9050 for system Tor; see the --socks-port notes below for
+how to choose. --insecure is needed for the self-signed certs most markets use.)
 
 Steps:
 1. The script opens Firefox through Tor
@@ -376,8 +379,18 @@ Required Options:
   Use Tor SOCKS5 proxy (recommended for .onion sites)
 
 --socks-port PORT
-  Tor SOCKS port (default: 9050)
-  Change to 9150 if using Tor Browser Bundle
+  Tor SOCKS port. Use 9050 for system Tor (Homebrew) or 9150 for Tor
+  Browser's own Tor. These are SEPARATE Tor clients with independent
+  circuits and hidden-service descriptor caches, so a .onion that times
+  out on one port may be reachable on the other. If a site loads in Tor
+  Browser but times out in the pipeline, use 9150 and keep Tor Browser
+  open (port 9150 only exists while the Tor Browser app is running).
+
+--insecure
+  Skip TLS certificate verification. Usually required: most markets
+  redirect to HTTPS and serve self-signed certs, which otherwise fail
+  with "CERTIFICATE_VERIFY_FAILED". Safe on .onion because the onion
+  address itself provides authentication.
 
 --manual
   Enable manual CAPTCHA solving mode
@@ -499,6 +512,41 @@ To inspect (advanced):
 $ python -c "import pickle; print(pickle.load(open('scraping_checkpoint.pkl','rb')))"
 
 
+
+
+================================================================================
+                            7. TROUBLESHOOTING
+================================================================================
+
+PROBLEM: A .onion times out in the pipeline but loads in Tor Browser.
+------------------------------------------------------------------------
+Cause: Tor Browser uses its own Tor (port 9150), while the pipeline defaults
+to system Tor (port 9050). They are separate clients with independent
+circuits and descriptor caches, so one can reach a service the other can't.
+
+Fix: Run with --socks-port 9150 and keep Tor Browser open while scraping.
+
+Diagnose by comparing the two ports directly:
+  $ curl -s -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+      --socks5-hostname 127.0.0.1:9050 --max-time 60 "http://<onion-host>/"
+  $ curl -s -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+      --socks5-hostname 127.0.0.1:9150 --max-time 60 "http://<onion-host>/"
+
+"HTTP 000" / timeout = that Tor client can't currently route to the service.
+A 2xx/3xx = it can. Restarting system Tor sometimes clears a stuck 9050:
+  $ brew services restart tor
+
+If BOTH ports time out, the onion service itself is likely down or its
+address has changed (markets rotate onion addresses often).
+
+
+PROBLEM: SSLError "CERTIFICATE_VERIFY_FAILED (self-signed certificate)".
+------------------------------------------------------------------------
+Cause: The market redirected http -> https and serves a self-signed cert,
+which fails requests' default certificate verification.
+
+Fix: Add --insecure to skip cert verification. This is expected and safe on
+.onion addresses, where the onion address itself provides authentication.
 
 
 ================================================================================
