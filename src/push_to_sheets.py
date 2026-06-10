@@ -24,13 +24,17 @@ import gspread
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 
-DEFAULT_JSON = DATA_DIR / "filtered" / "filtered_medicines.json"
+DEFAULT_JSON = [
+    DATA_DIR / "filtered" / "filtered_medicines.json",
+    DATA_DIR / "filtered" / "filtered_torzon_medicines.json",
+]
 DEFAULT_CREDENTIALS = BASE_DIR / "credentials" / "service_account.json"
 DEFAULT_SHEET_ID = "1mZp58VNB1qR2A5SsKApvuOMAtZV7tUF1EOOHBqKSsUM"
 DEFAULT_WORKSHEET = "Listings"
 
 # Column order written to the sheet. Mirrors filter_medicines.PREFERRED_HEADERS
-# plus the match metadata the filter appends.
+# plus the match metadata the filter appends. The category / ship_from / ship_to
+# columns are only populated for TorZon listings; other markets leave them blank.
 COLUMNS: List[str] = [
     "market_name",
     "listing_title",
@@ -40,6 +44,9 @@ COLUMNS: List[str] = [
     "review",
     "description",
     "number_in_stocks",
+    "category",
+    "ship_from",
+    "ship_to",
     "matched_terms",
     "matched_categories",
     "original_url",
@@ -64,8 +71,7 @@ def _cell(value: object) -> str:
     return str(value)
 
 
-def build_rows(listings: Sequence[Dict
-[str, object]]) -> List[List[str]]:
+def build_rows(listings: Sequence[Dict[str, object]]) -> List[List[str]]:
     rows: List[List[str]] = [COLUMNS]
     for item in listings:
         rows.append([_cell(item.get(col, "")) for col in COLUMNS])
@@ -92,8 +98,9 @@ def push(rows: List[List[str]], credentials: Path, sheet_id: str, worksheet_name
 
 def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--json-input", "-j", type=Path, default=DEFAULT_JSON,
-                        help=f"Filtered listings JSON (default: {DEFAULT_JSON})")
+    parser.add_argument("--json-input", "-j", type=Path, nargs="+", default=DEFAULT_JSON,
+                        help="One or more filtered listings JSON files; their listings are "
+                             "concatenated into a single sheet (default: merged + TorZon)")
     parser.add_argument("--credentials", "-c", type=Path, default=DEFAULT_CREDENTIALS,
                         help=f"Service account JSON key (default: {DEFAULT_CREDENTIALS})")
     parser.add_argument("--sheet-id", default=DEFAULT_SHEET_ID,
@@ -111,7 +118,17 @@ def main(argv: List[str] | None = None) -> None:
             "See the setup notes at the top of this file."
         )
 
-    listings = load_listings(args.json_input)
+    listings: List[Dict[str, object]] = []
+    for path in args.json_input:
+        if not path.exists():
+            print(f"  skip (missing): {path}")
+            continue
+        chunk = load_listings(path)
+        print(f"  loaded {len(chunk)} from {path.name}")
+        listings.extend(chunk)
+    if not listings:
+        raise SystemExit("No listings found in any input file; nothing to push.")
+
     rows = build_rows(listings)
     url = push(rows, args.credentials, args.sheet_id, args.worksheet)
     print(f"Wrote {len(listings)} listing(s) to worksheet '{args.worksheet}' in {url}")
