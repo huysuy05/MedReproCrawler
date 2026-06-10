@@ -63,20 +63,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--file-a",
         type=Path,
-        default=BASE_DIR / "data" / "filtered_medicines2.csv",
-        help="First CSV to merge (defaults to data/filtered_medicines2.csv)",
+        default=BASE_DIR / "data" / "filtered" / "filtered_medicines2.csv",
+        help="First CSV to merge (defaults to data/filtered/filtered_medicines2.csv)",
     )
     parser.add_argument(
         "--file-b",
         type=Path,
-        default=BASE_DIR / "data" / "filtered_torzon_medicines.csv",
-        help="Second CSV to merge (defaults to data/filtered_torzon_medicines.csv)",
+        default=BASE_DIR / "data" / "filtered" / "filtered_torzon_medicines.csv",
+        help="Second CSV to merge (defaults to data/filtered/filtered_torzon_medicines.csv)",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=BASE_DIR / "data" / "final_filtered_medcinde.csv",
-        help="Output CSV path (defaults to data/final_filtered_medcinde.csv)",
+        default=BASE_DIR / "data" / "filtered" / "final_filtered_medcinde.csv",
+        help="Output CSV path (defaults to data/filtered/final_filtered_medcinde.csv)",
     )
     return parser.parse_args(argv)
 

@@ -15,8 +15,8 @@ from filter_medicines import (
 
 def parse_args() -> argparse.Namespace:
     project_root = Path(__file__).resolve().parents[1]
-    default_input = project_root / "data" / "parsed-torzone.json"
-    default_output = project_root / "data" / "filtered_torzon_medicines.csv"
+    default_input = project_root / "data" / "parsed" / "parsed-torzone.json"
+    default_output = project_root / "data" / "filtered" / "filtered_torzon_medicines.csv"
     parser = argparse.ArgumentParser(
         description="Filter Torzon parsed drugs for specified medicines and export to CSV."
     )

@@ -3,3 +3,6 @@ pymongo
 requests
 beautifulsoup4
 termcolor
+gspread
+google-auth
+ijson

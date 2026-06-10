@@ -14,7 +14,10 @@ This repository contains a lightweight scraper that loads category pages (from `
 ## Important files
 
 - `scrape_simple.py` — main scraper. Use this instead of the older `scrape.py`/`scrape_old.py` if available.
+- `discover_markets.py` — finds candidate marketplaces to crawl (see "Discovering marketplaces" below).
 - `pages_url.json` — JSON array of category/listing URLs. Edit to add or remove pages; the scraper will NOT auto-advance beyond what's in this file.
+- `search_keywords.json` — medicine keywords grouped by research category (`contraception`, `abortion`). Drives both discovery scoring and `filter_medicines.py`.
+- `discovery_sources.json` — directories + search engine config for `discover_markets.py`.
 - `run.sh` — helper script that checks for Tor and runs the scraper with recommended flags.
 - `reqs.txt` — Python dependencies.
 
@@ -71,6 +74,49 @@ curl -s -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
 A `HTTP 000` / timeout means that Tor client currently can't route to the service; a `2xx`/`3xx` means it can. Restarting system Tor (`brew services restart tor`) sometimes clears a stuck `9050`.
 - `--page-timeout <seconds>` — increase if pages load slowly over Tor.
 - `--session-wait <seconds>` — seconds to wait after opening a page before collecting cookies (default 60).
+
+## Discovering marketplaces
+
+Finding which markets to put in `pages_url.json` is otherwise manual. `discover_markets.py` automates the search and produces a **ranked candidate report** for you to review.
+
+How it works (four stages):
+1. **Seed** — collects candidate `.onion` markets from curated directories (dark.fail, tor.taxi, daunt) and a server-rendered onion search engine (Torch by default), configured in `data/discovery_sources.json`. (Ahmia's clearnet site is JavaScript-only and returns an empty page to a plain fetch, so it isn't used.)
+2. **Liveness** — probes each candidate through Tor and drops dead ones.
+3. **Score** — generically crawls each live market (homepage + a few category pages) and counts how many of your `search_keywords.json` medicines appear. Markets behind a login/CAPTCHA wall are marked `wall/manual` (not scored) so they aren't silently dropped.
+4. **Report** — ranks by score and writes `data/candidate_markets.json` and `data/candidate_markets.csv`, plus a console table.
+
+Run it with the same Tor flags as the scraper:
+
+```bash
+python src/discover_markets.py --socks --socks-port 9150 --insecure
+# dry run (seeding only, no crawling):
+python src/discover_markets.py --socks --socks-port 9150 --insecure --seeds-only
+```
+
+Then **review `data/candidate_markets.csv`** and confirm each onion is authentic before crawling — dark-web markets are heavily impersonated by phishing clones, which is why this step is deliberately manual. Promote chosen markets either by copying their `candidate_category_urls` into `pages_url.json`, or with the opt-in helper:
+
+```bash
+python src/discover_markets.py --socks --socks-port 9150 --insecure --promote <onion-host> [<onion-host> ...]
+```
+
+Useful flags: `--max-candidates N` (cap how many seeds get scored), `--max-pages-per-market N` (pages crawled per market), `--timeout S` (per-request timeout).
+
+## Targeting categories within a market
+
+Once you've picked an authentic market, `target_categories.py` enumerates *that market's* category pages and flags the research-relevant ones (pharmacy / prescription / health / women's / hormones / ...), so the crawler only fetches what matters instead of the whole catalog. It's the depth complement to `discover_markets.py`'s breadth.
+
+```bash
+# report only (writes data/category_candidates.csv + .json):
+python src/target_categories.py http://<onion>/ --socks --socks-port 9150 --insecure
+
+# expand pagination + append the relevant categories to pages_url.json:
+python src/target_categories.py http://<onion>/ --socks --socks-port 9150 --insecure --expand-pages --write
+
+# for login / CAPTCHA / anti-DDoS "access queue" markets, capture a session in a browser first:
+python src/target_categories.py http://<onion>/ --socks --socks-port 9150 --insecure --manual
+```
+
+Review `data/category_candidates.csv` (✔ = flagged relevant); only relevant categories are written to `pages_url.json`, and writes are deduped. If a market is gated, the tool detects it and tells you to re-run with `--manual`. Other flags: `--depth 2` (also follow each category once for sub-categories), `--page-cap N` (max pages to expand per category).
 
 ## Output
 

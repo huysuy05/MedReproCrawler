@@ -27,6 +27,7 @@ marketplaces through Tor.
    5.3. Keyword Search Mode
    5.4. Command-Line Options
 6. Output Files
+6.5. Discovering Marketplaces
 7. Troubleshooting
 8. Best Practices and Legal Disclaimer
 
@@ -512,6 +513,49 @@ To inspect (advanced):
 $ python -c "import pickle; print(pickle.load(open('scraping_checkpoint.pkl','rb')))"
 
 
+
+
+================================================================================
+                       6.5. DISCOVERING MARKETPLACES
+================================================================================
+
+Finding which markets to crawl is automated by discover_markets.py, which emits
+a ranked candidate report for you to review (it never auto-edits pages_url.json).
+
+Pipeline:
+  A. Seed   - candidate .onion markets from curated directories (dark.fail,
+              tor.taxi, daunt) and a server-rendered onion search engine (Torch
+              by default). Configure both in data/discovery_sources.json.
+              (Ahmia's clearnet site is JS-only and returns an empty page to a
+              plain fetch, so it is not used.)
+  B. Live   - probe each candidate through Tor; drop dead ones.
+  C. Score  - generic crawl (homepage + a few category pages), counting how many
+              of your data/search_keywords.json medicines appear. Markets behind
+              a login/CAPTCHA wall are marked "wall/manual" (not scored) instead
+              of being dropped.
+  D. Report - rank by score; write data/candidate_markets.json + .csv and print
+              a console table.
+
+Run (same Tor flags as the scraper):
+  $ python src/discover_markets.py --socks --socks-port 9150 --insecure
+
+  Dry run (seeding only):
+  $ python src/discover_markets.py --socks --socks-port 9150 --insecure --seeds-only
+
+IMPORTANT - phishing caveat: dark-web markets are heavily impersonated by
+phishing clones. Always confirm a candidate's onion address is authentic (cross-
+check against the market's PGP-signed canonical address on a directory like
+dark.fail) BEFORE crawling it. This is why promotion is manual.
+
+Promote reviewed markets either by copying their candidate_category_urls from the
+CSV into pages_url.json, or with the opt-in helper:
+  $ python src/discover_markets.py --socks --socks-port 9150 --insecure \
+      --promote <onion-host> [<onion-host> ...]
+
+Useful flags:
+  --max-candidates N        cap how many seeded onions get scored (default 40)
+  --max-pages-per-market N  pages crawled per market while scoring (default 5)
+  --timeout S               per-request timeout in seconds (default 60)
 
 
 ================================================================================

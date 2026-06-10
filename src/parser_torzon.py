@@ -164,8 +164,8 @@ def parse_all(entries: Iterable[Dict[str, str]]) -> List[Dict[str, object]]:
 
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
-    input_path = project_root / "data" / "torzone-html.json"
-    output_path = project_root / "data" / "parsed-torzone.json"
+    input_path = project_root / "data" / "raw" / "torzone-html.json"
+    output_path = project_root / "data" / "parsed" / "parsed-torzone.json"
 
     entries = load_products_data(input_path)
     parsed = parse_all(entries)

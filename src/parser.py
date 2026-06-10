@@ -23,6 +23,7 @@ TODO
 - Consider removing data processing (eg. Splitting, stripping, etc) to store raw data
 """
 
+import argparse
 import json
 import re
 import os
@@ -57,7 +58,12 @@ def extract_market_name(soup):
         # Pattern for X Wave Market: "Product Name - THE X WAVE MARKET"
         if ' - THE X WAVE MARKET' in title_text:
             return "THE X WAVE MARKET"
-        
+
+        # Pattern for Black Ops: "Product «...» - Black Ops" (plain hyphen, so the
+        # generic em-dash/pipe splitters below miss it).
+        if title_text.endswith('- Black Ops') or ' - Black Ops' in title_text:
+            return "Black Ops"
+
         # Look for pattern: "Product Name – Marketplace Name" (em dash)
         if '–' in title_text:
             parts = title_text.split('–')
@@ -103,6 +109,7 @@ def extract_listing_title(soup):
     """Extract listing title from various h1 selectors for different marketplaces"""
     # Try various h1 selectors for different marketplaces
     h1_selectors = [
+        '.product_pg_r_title',           # Black Ops (clean title, avoids inner-hyphen truncation)
         'h1.product_title.entry-title',  # Emotive drugstore
         'h1.product-title.entry-title',  # X Wave Market
         'h1.entry-title.product-title',  # X Wave Market (alternate order)
@@ -308,6 +315,15 @@ def extract_reviews(soup):
 
 def extract_description(soup):
     """Extract drug description from various possible locations"""
+    # Black Ops keeps the description body in .product_pg_r_text. Check it first
+    # with a low length gate -- these blurbs (active ingredient / manufacturer /
+    # package) are short but are exactly what the keyword filter needs.
+    blackops_desc = soup.select_one('.product_pg_r_text')
+    if blackops_desc:
+        text = clean_text(blackops_desc.get_text())
+        if text and len(text) > 10:
+            return text[:500] + "..." if len(text) > 500 else text
+
     description_selectors = [
         '.product-description',
         '.product-content',
@@ -465,6 +481,7 @@ def load_products_data(filename="products_html.json"):
 def save_parsed_data(parsed_products, filename="../data/parsed_drugs.json"):
     """Save the parsed drug data to a new JSON file"""
     try:
+        os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(parsed_products, f, ensure_ascii=False, indent=2)
         print(colored(f"✅ Saved {len(parsed_products)} parsed products to {filename}", "green"))
@@ -474,10 +491,21 @@ def save_parsed_data(parsed_products, filename="../data/parsed_drugs.json"):
 
 def main():
     """Main function to parse all products and save results"""
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    default_input = os.path.join(base_dir, "data", "merged", "products_html_merged.json")
+    default_output = os.path.join(base_dir, "data", "parsed", "parsed_merged.json")
+
+    arg_parser = argparse.ArgumentParser(description="Parse scraped product HTML into structured records.")
+    arg_parser.add_argument("--input", "-i", default=default_input,
+                            help=f"Path to the (merged) products_html JSON (default: {default_input})")
+    arg_parser.add_argument("--output", "-o", default=default_output,
+                            help=f"Destination for parsed records (default: {default_output})")
+    args = arg_parser.parse_args()
+
     print(colored("🚀 Starting HTML Parser for Drug Data", "cyan", attrs=['bold']))
-    
+
     # Load the scraped data
-    products_data = load_products_data()
+    products_data = load_products_data(args.input)
     if not products_data:
         print(colored("❌ No data to parse. Exiting.", "red"))
         return
@@ -504,12 +532,12 @@ def main():
     print(colored(f"💾 SAVING RESULTS", "cyan", attrs=['bold']))
     print(colored(f"{'='*80}", "cyan"))
     
-    save_parsed_data(parsed_products)
-    
+    save_parsed_data(parsed_products, args.output)
+
     print(colored(f"\n✅ Parsing complete!", "green", attrs=['bold']))
     print(colored(f"   Successfully parsed: {len(parsed_products)} products", "green"))
     print(colored(f"   Failed to parse: {failed_count} products", "red" if failed_count > 0 else "green"))
-    print(colored(f"   Saved to: data/parsed_drugs.json", "green"))
+    print(colored(f"   Saved to: {args.output}", "green"))
 
 
 if __name__ == "__main__":

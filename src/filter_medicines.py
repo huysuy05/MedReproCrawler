@@ -297,12 +297,25 @@ TERM_GROUPS: Dict[str, Sequence[str]] = {
 }
 
 
-def build_patterns() -> List[Tuple[str, str, re.Pattern[str]]]:
+def load_term_groups(path: Path) -> Dict[str, Sequence[str]]:
+    """Load keyword categories from a JSON file shaped like {category: [terms]}.
+
+    Lets callers (e.g. the discovery tool) share a single keyword source —
+    data/search_keywords.json — instead of the hardcoded TERM_GROUPS below.
+    """
+    with path.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError("Expected the keywords JSON to be an object of {category: [terms]}")
+    return {str(category): list(terms) for category, terms in data.items()}
+
+
+def build_patterns(term_groups: Dict[str, Sequence[str]] = TERM_GROUPS) -> List[Tuple[str, str, re.Pattern[str]]]:
     """Create regex patterns that tolerate punctuation and spacing differences."""
     compiled: List[Tuple[str, str, re.Pattern[str]]] = []
-    for category, terms in TERM_GROUPS.items():
+    for category, terms in term_groups.items():
         for term in terms:
-            raw_tokens = re.split(r"[\\s\\-]+", term)
+            raw_tokens = re.split(r"[\s\-]+", term)
             tokens = [re.escape(token) for token in raw_tokens if token]
             if not tokens:
                 continue
@@ -388,30 +401,64 @@ def write_csv(products: Sequence[Dict[str, object]], headers: Sequence[str], out
             writer.writerow(row)
 
 
+def dedupe_products(products: Sequence[Dict[str, object]], key: str = "original_url") -> List[Dict[str, object]]:
+    """Drop duplicate listings, keyed by `original_url` (safety net post-parse)."""
+    seen: Set[str] = set()
+    unique: List[Dict[str, object]] = []
+    for product in products:
+        identifier = normalise_cell(product.get(key, ""))
+        if identifier and identifier in seen:
+            continue
+        if identifier:
+            seen.add(identifier)
+        unique.append(product)
+    return unique
+
+
+def write_json(products: Sequence[Dict[str, object]], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as fh:
+        json.dump(list(products), fh, ensure_ascii=False, indent=2)
+
+
 def parse_args() -> argparse.Namespace:
     project_root = Path(__file__).resolve().parents[1]
-    default_input = project_root / "data" / "parsed_drugs.json"
-    default_output = project_root / "data" / "filtered_medicines2.csv"
-    parser = argparse.ArgumentParser(description="Filter parsed drugs for specified medicines and export to CSV.")
-    parser.add_argument("--input", "-i", type=Path, default=default_input, help="Path to parsed_drugs.json")
+    default_input = project_root / "data" / "parsed" / "parsed_merged.json"
+    default_output = project_root / "data" / "filtered" / "filtered_medicines.csv"
+    default_json = project_root / "data" / "filtered" / "filtered_medicines.json"
+    default_keywords = project_root / "data" / "config" / "search_keywords.json"
+    parser = argparse.ArgumentParser(description="Filter parsed drugs for specified medicines and export to CSV + JSON.")
+    parser.add_argument("--input", "-i", type=Path, default=default_input, help="Path to the parsed products JSON")
     parser.add_argument("--output", "-o", type=Path, default=default_output, help="Destination CSV path")
+    parser.add_argument("--json-output", "-j", type=Path, default=default_json,
+                        help="Destination JSON path (consumed by push_to_sheets.py)")
+    parser.add_argument("--keywords", "-k", type=Path, default=default_keywords,
+                        help="Keyword groups JSON ({category: [terms]}); falls back to built-in TERM_GROUPS if missing")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     products = load_products(args.input)
-    patterns = build_patterns()
+
+    if args.keywords and args.keywords.exists():
+        term_groups = load_term_groups(args.keywords)
+    else:
+        term_groups = TERM_GROUPS
+    patterns = build_patterns(term_groups)
+
     filtered = filter_products(products, patterns)
+    filtered = dedupe_products(filtered)
     if not filtered:
-        # Write an empty file with standard headers to avoid stale data.
-        headers = list(PREFERRED_HEADERS)
-        write_csv([], headers, args.output)
-        print("No products matched the supplied medicine terms. Wrote empty CSV with headers.")
+        # Write empty files with standard headers to avoid stale data.
+        write_csv([], list(PREFERRED_HEADERS), args.output)
+        write_json([], args.json_output)
+        print("No products matched the supplied medicine terms. Wrote empty CSV/JSON.")
         return
     headers = determine_columns(filtered)
     write_csv(filtered, headers, args.output)
-    print(f"Wrote {len(filtered)} products to {args.output}")
+    write_json(filtered, args.json_output)
+    print(f"Wrote {len(filtered)} products to {args.output} and {args.json_output}")
 
 
 if __name__ == "__main__":

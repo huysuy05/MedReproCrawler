@@ -49,13 +49,13 @@ PROXY_PORT = 8118
 TOR_SOCKS_PORT = 9050
 
 # Browser/session behaviour
-SESSION_WARMUP_SECONDS = 60
+SESSION_WARMUP_SECONDS = 30
 
 # Input/Output files
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
-PAGES_URL_FILE = DATA_DIR / "pages_url.json"
-PRODUCTS_HTML_FILE = DATA_DIR / "products_html.json"
+PAGES_URL_FILE = DATA_DIR / "config" / "pages_url.json"
+PRODUCTS_HTML_FILE = DATA_DIR / "raw" / "products_html.json"
 
 
 def load_pages_urls():
@@ -79,8 +79,9 @@ def load_pages_urls():
 def save_products_html(products, output_path, overwrite=True):
     """Save product HTML data to the specified JSON file"""
     mode = 'w' if overwrite else 'a'
-    
+
     try:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         with open(output_path, mode, encoding='utf-8') as f:
             json.dump(products, f, ensure_ascii=False, indent=2)
         print(colored(f"✅ Saved {len(products)} products to {output_path}", "green"))
@@ -120,8 +121,41 @@ def setup_requests_session(cookies, use_socks=False, socks_port=9050, verify_ssl
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; rv:102.0) Gecko/20100101 Firefox/102.0'
     })
     session.verify = verify_ssl
-    
+
     return session
+
+
+def build_firefox_options(use_socks=False, socks_port=TOR_SOCKS_PORT, tor_binary=None, disable_js=False):
+    """Build Firefox options pointed at Tor (SOCKS5 or HTTP proxy).
+
+    Shared by the scraper and other tools (e.g. target_categories.py) so the
+    browser/proxy behaviour stays identical across the pipeline.
+    """
+    options = Options()
+    if tor_binary:
+        options.binary_location = tor_binary
+
+    options.set_preference("network.proxy.type", 1)
+
+    if use_socks:
+        options.set_preference("network.proxy.socks", PROXY_HOST)
+        options.set_preference("network.proxy.socks_port", socks_port)
+        options.set_preference("network.proxy.socks_version", 5)
+        # Let Tor handle DNS lookups so .onion hosts resolve correctly.
+        options.set_preference("network.proxy.socks_remote_dns", True)
+    else:
+        options.set_preference("network.proxy.http", PROXY_HOST)
+        options.set_preference("network.proxy.http_port", PROXY_PORT)
+        options.set_preference("network.proxy.ssl", PROXY_HOST)
+        options.set_preference("network.proxy.ssl_port", PROXY_PORT)
+
+    options.set_preference("network.proxy.no_proxies_on", "")
+
+    if disable_js:
+        # Disabling JS can help avoid heavy pages or scripts that detect automation.
+        options.set_preference("javascript.enabled", False)
+
+    return options
 
 
 def extract_product_links(html, base_url):
@@ -252,8 +286,63 @@ def scrape_category_page(session, category_url):
     
     if pagination_links:
         print(colored(f"📑 Found {len(pagination_links)} pagination links", "blue"))
-    
+
     return product_links, pagination_links
+
+
+def enumerate_pagination(session, seed_url, page_cap=2000):
+    """Pre-scan: fetch the seed page once and return the explicit, ordered list of
+    page URLs (page 1..max) recognized from same-host links that share the seed's
+    numbered-page pattern.
+
+    This lets the crawler walk a fixed, forward page set instead of vaguely
+    following arbitrary pagination/nav links (which caused backward jumps and
+    off-site detours). Falls back to [seed_url] if no page pattern is found.
+    """
+    # Locate the page number in the seed URL: prefer an explicit page param,
+    # otherwise a /page/N path, otherwise the last integer in the URL.
+    template = None
+    seed_page = None
+    for pat in (r'([?&]page=)(\d+)', r'([?&]paged=)(\d+)', r'([?&]p=)(\d+)', r'(/page/)(\d+)'):
+        m = re.search(pat, seed_url)
+        if m:
+            template = seed_url[:m.start(2)] + "{n}" + seed_url[m.end(2):]
+            seed_page = int(m.group(2))
+            break
+    if template is None:
+        ints = list(re.finditer(r'\d+', seed_url))
+        if not ints:
+            print(colored("ℹ️  Seed URL has no page number to enumerate; crawling it as-is.", "yellow"))
+            return [seed_url]
+        last = ints[-1]
+        template = seed_url[:last.start()] + "{n}" + seed_url[last.end():]
+        seed_page = int(last.group())
+
+    html = fetch_page_html(session, seed_url)
+    if not html:
+        print(colored("⚠️  Pre-scan could not fetch the seed page; crawling it as-is.", "yellow"))
+        return [seed_url]
+
+    matcher = re.compile(re.escape(template).replace(re.escape("{n}"), r"(\d+)"))
+    soup = BeautifulSoup(html, 'html.parser')
+    host = urllib.parse.urlparse(seed_url).netloc
+    page_numbers = {seed_page}
+    for link in soup.find_all('a', href=True):
+        full_url = urllib.parse.urljoin(seed_url, link['href'])
+        if urllib.parse.urlparse(full_url).netloc != host:
+            continue  # ignore off-site links entirely
+        match = matcher.fullmatch(full_url)
+        if match:
+            page_numbers.add(int(match.group(1)))
+
+    max_page = min(max(page_numbers), page_cap)
+    pages = [template.replace("{n}", str(n)) for n in range(1, max_page + 1)]
+    print(colored(f"🔎 Pre-scan recognized {len(pages)} page(s): 1–{max_page} "
+                  f"(pattern: {template.replace('{n}', 'N')})", "cyan", attrs=['bold']))
+    if max_page == seed_page:
+        print(colored("   (Only the current page window was exposed — if the category has more "
+                       "pages, seed a higher page number or check for a 'last page' link.)", "yellow"))
+    return pages
 
 
 def scrape_product_page(session, product_url, category_url, market_name):
@@ -290,7 +379,7 @@ def main():
     parser.add_argument('--max-products', type=int, default=None,
                        help='Maximum number of products to scrape (default: unlimited)')
     parser.add_argument('--session-wait', type=int, default=SESSION_WARMUP_SECONDS,
-                       help='Seconds to wait after opening a page before collecting cookies (default: 60)')
+                       help='Seconds to wait after opening a page before collecting cookies (default: 30)')
     parser.add_argument('--disable-js', action='store_true',
                        help='Disable JavaScript execution in the browser (Firefox preference)')
     parser.add_argument('--insecure', action='store_true',
@@ -299,7 +388,9 @@ def main():
                        help='Leave Firefox open at the end so you can see/solve CAPTCHAs if sessions refresh')
     parser.add_argument('--max-pages-per-category', type=int, default=3,
                        help='Follow pagination up to this many pages per category (0 = unlimited, 1 = first page only)')
-    
+    parser.add_argument('--enumerate-pages', action='store_true',
+                       help='Pre-scan each seed page to recognize its full page range (page 1..max) and crawl exactly those, instead of following pagination links')
+
     args = parser.parse_args()
     
     # Load category URLs
@@ -331,29 +422,12 @@ def main():
         if driver is not None:
             return driver
 
-        options = Options()
-        if args.tor_binary:
-            options.binary_location = args.tor_binary
-
-        options.set_preference("network.proxy.type", 1)
-
-        if args.socks:
-            options.set_preference("network.proxy.socks", PROXY_HOST)
-            options.set_preference("network.proxy.socks_port", args.socks_port)
-            options.set_preference("network.proxy.socks_version", 5)
-            # Let Tor handle DNS lookups so .onion hosts resolve correctly.
-            options.set_preference("network.proxy.socks_remote_dns", True)
-        else:
-            options.set_preference("network.proxy.http", PROXY_HOST)
-            options.set_preference("network.proxy.http_port", PROXY_PORT)
-            options.set_preference("network.proxy.ssl", PROXY_HOST)
-            options.set_preference("network.proxy.ssl_port", PROXY_PORT)
-
-        options.set_preference("network.proxy.no_proxies_on", "")
-
-        if args.disable_js:
-            # Disabling JS can help avoid heavy pages or scripts that detect automation.
-            options.set_preference("javascript.enabled", False)
+        options = build_firefox_options(
+            use_socks=args.socks,
+            socks_port=args.socks_port,
+            tor_binary=args.tor_binary,
+            disable_js=args.disable_js,
+        )
 
         driver = webdriver.Firefox(options=options)
         driver.set_page_load_timeout(args.page_timeout)
@@ -436,9 +510,18 @@ def main():
             
             # Crawl paginated category pages
             pages_seen = set()
-            page_queue = [category_url]
             pages_scraped = 0
-            page_limit = None if args.max_pages_per_category == 0 else args.max_pages_per_category
+
+            if args.enumerate_pages:
+                # Pre-scan the seed once to build the explicit, forward page set, then
+                # crawl exactly those pages without following any other links.
+                page_queue = enumerate_pagination(host_sessions.get(market_name) or session, category_url)
+                follow_pagination = False
+                page_limit = None
+            else:
+                page_queue = [category_url]
+                follow_pagination = True
+                page_limit = None if args.max_pages_per_category == 0 else args.max_pages_per_category
 
             while page_queue:
                 if page_limit is not None and pages_scraped >= page_limit:
@@ -461,10 +544,12 @@ def main():
                         print(colored("❌ Skipping page due to repeated fetch failures", "red", attrs=['bold']))
                         continue
 
-                # Add new pagination links to queue
-                for link in pagination_links or []:
-                    if link not in pages_seen:
-                        page_queue.append(link)
+                # Add new pagination links to queue (skipped in --enumerate-pages
+                # mode, where the full page set was already built by the pre-scan).
+                if follow_pagination:
+                    for link in pagination_links or []:
+                        if link not in pages_seen:
+                            page_queue.append(link)
 
                 pages_scraped += 1
 
