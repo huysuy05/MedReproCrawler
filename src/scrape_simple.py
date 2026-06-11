@@ -290,59 +290,42 @@ def scrape_category_page(session, category_url):
     return product_links, pagination_links
 
 
-def enumerate_pagination(session, seed_url, page_cap=2000):
-    """Pre-scan: fetch the seed page once and return the explicit, ordered list of
-    page URLs (page 1..max) recognized from same-host links that share the seed's
-    numbered-page pattern.
+# Explicit pagination markers. Each lives in the query string or path, never in
+# the netloc -- important because v3 onion hosts are full of digits (2-7) that
+# must not be mistaken for page numbers.
+PAGE_PATTERNS = (
+    r'([?&]page=)(\d+)',
+    r'([?&]paged=)(\d+)',
+    r'([?&]p=)(\d+)',
+    r'(/page/)(\d+)',
+)
 
-    This lets the crawler walk a fixed, forward page set instead of vaguely
-    following arbitrary pagination/nav links (which caused backward jumps and
-    off-site detours). Falls back to [seed_url] if no page pattern is found.
+
+def find_page_pattern(url):
+    """Return (template, page_number) if `url` carries an explicit pagination
+    marker (?page=N, &paged=N, /page/N, ...), else None.
+
+    `template` is the URL with '{n}' in place of the page number, so callers can
+    rebuild any page. Only the query/path is inspected (the patterns are anchored
+    to '?'/'&'/'/page/'), so digits inside the onion hostname are never treated
+    as page numbers.
     """
-    # Locate the page number in the seed URL: prefer an explicit page param,
-    # otherwise a /page/N path, otherwise the last integer in the URL.
-    template = None
-    seed_page = None
-    for pat in (r'([?&]page=)(\d+)', r'([?&]paged=)(\d+)', r'([?&]p=)(\d+)', r'(/page/)(\d+)'):
-        m = re.search(pat, seed_url)
+    for pat in PAGE_PATTERNS:
+        m = re.search(pat, url)
         if m:
-            template = seed_url[:m.start(2)] + "{n}" + seed_url[m.end(2):]
-            seed_page = int(m.group(2))
-            break
-    if template is None:
-        ints = list(re.finditer(r'\d+', seed_url))
-        if not ints:
-            print(colored("ℹ️  Seed URL has no page number to enumerate; crawling it as-is.", "yellow"))
-            return [seed_url]
-        last = ints[-1]
-        template = seed_url[:last.start()] + "{n}" + seed_url[last.end():]
-        seed_page = int(last.group())
+            template = url[:m.start(2)] + "{n}" + url[m.end(2):]
+            return template, int(m.group(2))
+    return None
 
-    html = fetch_page_html(session, seed_url)
-    if not html:
-        print(colored("⚠️  Pre-scan could not fetch the seed page; crawling it as-is.", "yellow"))
-        return [seed_url]
 
-    matcher = re.compile(re.escape(template).replace(re.escape("{n}"), r"(\d+)"))
-    soup = BeautifulSoup(html, 'html.parser')
-    host = urllib.parse.urlparse(seed_url).netloc
-    page_numbers = {seed_page}
-    for link in soup.find_all('a', href=True):
-        full_url = urllib.parse.urljoin(seed_url, link['href'])
-        if urllib.parse.urlparse(full_url).netloc != host:
-            continue  # ignore off-site links entirely
-        match = matcher.fullmatch(full_url)
-        if match:
-            page_numbers.add(int(match.group(1)))
+# Hard ceiling on the forward page-walk so a misbehaving (or clamping) market
+# can never spin forever. Reaching it prints a warning.
+WALK_PAGE_CAP = 1000
 
-    max_page = min(max(page_numbers), page_cap)
-    pages = [template.replace("{n}", str(n)) for n in range(1, max_page + 1)]
-    print(colored(f"🔎 Pre-scan recognized {len(pages)} page(s): 1–{max_page} "
-                  f"(pattern: {template.replace('{n}', 'N')})", "cyan", attrs=['bold']))
-    if max_page == seed_page:
-        print(colored("   (Only the current page window was exposed — if the category has more "
-                       "pages, seed a higher page number or check for a 'last page' link.)", "yellow"))
-    return pages
+
+def page_url(template, n):
+    """Build the URL for page `n` from a '{n}' template (see find_page_pattern)."""
+    return template.replace("{n}", str(n))
 
 
 def scrape_product_page(session, product_url, category_url, market_name):
@@ -389,7 +372,10 @@ def main():
     parser.add_argument('--max-pages-per-category', type=int, default=3,
                        help='Follow pagination up to this many pages per category (0 = unlimited, 1 = first page only)')
     parser.add_argument('--enumerate-pages', action='store_true',
-                       help='Pre-scan each seed page to recognize its full page range (page 1..max) and crawl exactly those, instead of following pagination links')
+                       help='(Legacy) URLs with a pagination marker (?page=N, /page/N, ...) are '
+                            'already page-walked automatically from page 1 until an empty page, '
+                            'so this flag is rarely needed; for a marker-less URL it just forces a '
+                            'single-page crawl instead of following pagination links')
 
     args = parser.parse_args()
     
@@ -512,13 +498,33 @@ def main():
             pages_seen = set()
             pages_scraped = 0
 
-            if args.enumerate_pages:
-                # Pre-scan the seed once to build the explicit, forward page set, then
-                # crawl exactly those pages without following any other links.
-                page_queue = enumerate_pagination(host_sessions.get(market_name) or session, category_url)
+            # Decide the crawl strategy for THIS url.
+            #  * URL with a pagination marker (?page=N, /page/N, ...): walk forward
+            #    from page 1, requesting page+1 as long as each page yields products,
+            #    until an empty (or repeated) page. This does NOT rely on the seed
+            #    page exposing every page link -- many markets only render a small
+            #    pagination window or build it with JS, so a one-shot scan under-counts.
+            #  * URL without a marker: normal crawl (single page, plus any pagination
+            #    links the market happens to expose).
+            page_pat = find_page_pattern(category_url)
+            walk_template = None
+            walk_prev_sig = None
+            if page_pat is not None:
+                walk_template = page_pat[0]
+                page_queue = [page_url(walk_template, 1)]  # always start from page 1
                 follow_pagination = False
                 page_limit = None
+                print(colored(f"🔎 Pagination detected → walking pages from 1 until empty "
+                              f"(pattern: {walk_template.replace('{n}', 'N')})", "cyan", attrs=['bold']))
+            elif args.enumerate_pages:
+                # Forced enumerate but the URL has no marker → just the single page.
+                page_queue = [category_url]
+                follow_pagination = False
+                page_limit = None
+                print(colored("   No pagination logic in URL → single-page crawl.", "yellow"))
             else:
+                # Normal crawl: single page, but still follow pagination links if the
+                # market exposes them.
                 page_queue = [category_url]
                 follow_pagination = True
                 page_limit = None if args.max_pages_per_category == 0 else args.max_pages_per_category
@@ -544,12 +550,29 @@ def main():
                         print(colored("❌ Skipping page due to repeated fetch failures", "red", attrs=['bold']))
                         continue
 
-                # Add new pagination links to queue (skipped in --enumerate-pages
-                # mode, where the full page set was already built by the pre-scan).
+                # Add new pagination links to queue (normal crawl only).
                 if follow_pagination:
                     for link in pagination_links or []:
                         if link not in pages_seen:
                             page_queue.append(link)
+
+                # Forward page-walk: enqueue the next page number as long as this
+                # page returned products and didn't just repeat the previous page
+                # (some markets clamp out-of-range page numbers to the last page).
+                if walk_template:
+                    sig = frozenset(product_links)
+                    cur = find_page_pattern(current_page)
+                    if not product_links:
+                        print(colored("   ⛔ Empty page → reached the end of pagination.", "yellow"))
+                    elif sig == walk_prev_sig:
+                        print(colored("   ⛔ Page repeats the previous one → reached the end of pagination.", "yellow"))
+                    elif cur and cur[1] >= WALK_PAGE_CAP:
+                        print(colored(f"   ⚠️  Hit the {WALK_PAGE_CAP}-page safety cap; stopping walk.", "yellow"))
+                    elif cur:
+                        nxt = page_url(walk_template, cur[1] + 1)
+                        if nxt not in pages_seen:
+                            page_queue.append(nxt)
+                    walk_prev_sig = sig
 
                 pages_scraped += 1
 
