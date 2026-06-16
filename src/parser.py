@@ -27,6 +27,7 @@ import argparse
 import json
 import re
 import os
+from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
 from termcolor import colored
 
@@ -63,6 +64,10 @@ def extract_market_name(soup):
         # generic em-dash/pipe splitters below miss it).
         if title_text.endswith('- Black Ops') or ' - Black Ops' in title_text:
             return "Black Ops"
+
+        # Pattern for Drug Hub: "Drug Hub - Product Name"
+        if title_text.startswith('Drug Hub - '):
+            return "Drug Hub"
 
         # Look for pattern: "Product Name – Marketplace Name" (em dash)
         if '–' in title_text:
@@ -106,27 +111,62 @@ def extract_market_name(soup):
 
 
 def extract_listing_title(soup):
-    """Extract listing title from various h1 selectors for different marketplaces"""
-    # Try various h1 selectors for different marketplaces
-    h1_selectors = [
-        '.product_pg_r_title',           # Black Ops (clean title, avoids inner-hyphen truncation)
-        'h1.product_title.entry-title',  # Emotive drugstore
-        'h1.product-title.entry-title',  # X Wave Market
-        'h1.entry-title.product-title',  # X Wave Market (alternate order)
-        'h1.entry-title',                # X Wave Market, general
+    """Extract the product/listing title for each marketplace.
+
+    Order matters: the market-specific selectors below are tried before the
+    generic fallbacks. The earlier ``a.title`` / ``a[class*="title"]`` selectors
+    were removed from the front because on the WooCommerce markets (Zion,
+    SHADOWGATE, E-Market, Maria Shop, BestShop, ...) they matched a vendor or
+    sidebar link instead of the real product title.
+    """
+    title_tag = soup.find('title')
+    title_text = clean_text(title_tag.get_text()) if title_tag else ""
+
+    # 1. Drug Hub: the product page <h1> is a "Shopping Cart" modal, so the real
+    #    listing title only lives in <title> as "Drug Hub - <product>".
+    if title_text.startswith('Drug Hub - '):
+        product = clean_text(title_text[len('Drug Hub - '):])
+        if product:
+            return product
+
+    # 2. Black Ops: custom template, title in a dedicated div (no h1). Checked
+    #    before the generic title splitters because the title contains hyphens.
+    blackops = soup.select_one('.product_pg_r_title')
+    if blackops:
+        text = clean_text(blackops.get_text())
+        if text:
+            return text
+
+    # 3. WooCommerce product pages. This covers Zion, Emotive Drugstore,
+    #    E-Market, BlackStar, Maria Shop, BestShop, SHADOWGATE, Darkweb
+    #    Dispensary, Apex Chemicals, Grace Med Store, Moon Market (Docs) and
+    #    Dark Market -- they all render the product name in the <h1> that
+    #    carries the ``product_title`` class.
+    woo_selectors = [
+        'h1.product_title.entry-title',
+        'h1.product-title.product_title.entry-title',
         'h1.product_title',
         'h1.product-title',
+        'h1.entry-title.product-title',
+        'h1.entry-title',
         'h1[class*="product"][class*="title"]',
     ]
-    
-    for selector in h1_selectors:
+    for selector in woo_selectors:
         element = soup.select_one(selector)
         if element:
             text = clean_text(element.get_text())
             if text:
                 return text
-    
-    # Fallback to other selectors for other marketplaces
+
+    # 4. TorZon: custom PHP market with no product_title h1. The product name is
+    #    the lone <h5> inside the centered product cell.
+    torzon = soup.select_one('center h5')
+    if torzon:
+        text = clean_text(torzon.get_text())
+        if text:
+            return text
+
+    # 5. Generic fallbacks for any other / unknown marketplace.
     selectors = [
         'h1[class*="product"]',
         'h1[class*="title"]',
@@ -136,7 +176,7 @@ def extract_listing_title(soup):
         '.drug-name',
         'title'
     ]
-    
+
     for selector in selectors:
         element = soup.select_one(selector)
         if element:
@@ -147,7 +187,7 @@ def extract_listing_title(soup):
                 text = re.sub(r'\s*\|.*$', '', text)    # Remove everything after pipe
                 text = re.sub(r'\s*Buy\s*', '', text, flags=re.IGNORECASE)  # Remove "Buy" prefix
                 return clean_text(text)
-    
+
     return ""
 
 
@@ -432,6 +472,60 @@ def extract_number_in_stocks(soup):
     return ""
 
 
+def is_product_url(url):
+    """Return True only for individual product/listing detail pages.
+
+    The scraper also captures non-listing pages -- add-to-cart redirects (which
+    return the shop page), category/shop index pages and vendor storefronts.
+    Those have no real product title, so we skip them at parse time. The rules
+    below cover every market's product-URL shape:
+
+      - Grace Med / BlackStar:  /?product=<slug>      (query string)
+      - most WooCommerce shops:  /product/<slug>/
+      - Emotive / Apex / SHADOWGATE:  /shop/<slug>/
+      - Drug Hub:  /listing/<id>/...
+      - TorZon:  /products.php?action=view&...
+
+    Anything with an ``add-to-cart`` param, a ``product_cat`` category listing,
+    a /store/ or /market/ vendor page, or a bare /shop/ index is rejected.
+    """
+    if not url:
+        return False
+
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+
+    # add-to-cart actions just re-render the shop page, never a product detail.
+    if 'add-to-cart' in query:
+        return False
+
+    segments = [s for s in parsed.path.split('/') if s]
+
+    # Query-string product pages (Grace Med, BlackStar). Guard against the
+    # ?product_cat=... category listings which share the same host.
+    if query.get('product') and not query.get('product_cat'):
+        return True
+
+    # /product/<slug> detail pages (most WooCommerce markets).
+    if 'product' in segments and segments.index('product') + 1 < len(segments):
+        return True
+
+    # Drug Hub listing pages: /listing/<id>/...
+    if 'listing' in segments:
+        return True
+
+    # TorZon custom PHP market: /products.php?action=view
+    if parsed.path.endswith('products.php') and query.get('action') == ['view']:
+        return True
+
+    # /shop/<slug> detail pages (Emotive, Apex, SHADOWGATE). A bare /shop/ index
+    # has no slug segment and is rejected.
+    if segments and segments[0] == 'shop' and len(segments) > 1:
+        return True
+
+    return False
+
+
 def parse_product_html(product_data):
     """Parse a single product's HTML and extract all relevant information"""
     try:
@@ -512,14 +606,22 @@ def main():
     
     parsed_products = []
     failed_count = 0
-    
+    skipped_count = 0
+
     print(colored(f"\n📊 Processing {len(products_data)} products...", "cyan"))
-    
+
     for i, product_data in enumerate(products_data, 1):
         print(colored(f"  [{i}/{len(products_data)}] Processing...", "white"), end=" ")
-        
+
+        # Skip non-listing pages (add-to-cart redirects, category/shop indexes
+        # and vendor storefronts) -- they carry no real product title.
+        if not is_product_url(product_data.get('product_url', '')):
+            skipped_count += 1
+            print(colored("⏭️  (non-listing)", "yellow"))
+            continue
+
         parsed_data = parse_product_html(product_data)
-        
+
         if parsed_data:
             parsed_products.append(parsed_data)
             print(colored("✅", "green"))
@@ -536,6 +638,7 @@ def main():
 
     print(colored(f"\n✅ Parsing complete!", "green", attrs=['bold']))
     print(colored(f"   Successfully parsed: {len(parsed_products)} products", "green"))
+    print(colored(f"   Skipped (non-listing pages): {skipped_count}", "yellow"))
     print(colored(f"   Failed to parse: {failed_count} products", "red" if failed_count > 0 else "green"))
     print(colored(f"   Saved to: {args.output}", "green"))
 

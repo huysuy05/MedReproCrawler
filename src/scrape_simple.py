@@ -33,6 +33,7 @@ import re
 import time
 import urllib.parse
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -248,22 +249,115 @@ def fetch_page_html(session, url, retries=3):
             print(colored(f"❌ Error fetching {url} (attempt {attempt+1}/{retries}): {e}", "red"))
             if attempt < retries - 1:
                 time.sleep(5)
-    
+
     return None
 
 
-def scrape_category_page(session, category_url):
-    """Scrape a category page and return all product links"""
+# A meta-refresh-to-homepage stub is how some markets (e.g. drughub) bounce a
+# request they consider unauthenticated/expired. Detect it so the browser fetch
+# can retry instead of accepting the empty page.
+_HOMEPAGE_BOUNCE_RE = re.compile(r'http-equiv=["\']?refresh["\']?[^>]*url=/?["\']?\s*/?\s*["\']?', re.IGNORECASE)
+
+
+def _looks_like_bounce(html):
+    return bool(html) and len(html) < 400 and bool(_HOMEPAGE_BOUNCE_RE.search(html))
+
+
+def _looks_like_captcha(html):
+    """True if the page is an anti-bot / CAPTCHA challenge rather than content."""
+    if not html:
+        return False
+    low = html.lower()
+    return ('<title' in low and 'captcha' in low.split('</title>')[0]) or \
+        any(w in low for w in ('captcha', 'verify you are human', 'cloudflare', 'ddos-guard', 'are you human'))
+
+
+def fetch_page_html_browser(driver, url, settle=3.0, retries=5, manual=False):
+    """Fetch a page through the live Selenium browser (carries JS cookies/tokens),
+    returning driver.page_source. Used for markets that reject deep pagination over
+    the plain requests session and redirect to the homepage or throw a CAPTCHA.
+
+    drughub's session goes stale after a handful of pages: it then either throws a
+    fresh CAPTCHA or bounces the request to the homepage. When `manual` is set, both
+    cases pause so the operator can re-solve / re-auth in the open browser; solving
+    once unlocks the next run of pages.
+
+    NOT thread-safe (one WebDriver), so only the serialized category-page path may
+    call it -- never the product worker threads.
+    """
+    for attempt in range(retries):
+        try:
+            driver.get(url)
+        except TimeoutException:
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+        except WebDriverException as exc:
+            print(colored(f"⚠️  Browser fetch failed for {url}: {exc}", "yellow"))
+            return None
+        if settle > 0:
+            time.sleep(settle)
+        html = driver.page_source
+
+        if not _looks_like_captcha(html) and not _looks_like_bounce(html):
+            return html  # got the real page
+
+        # Stale session: CAPTCHA challenge or homepage bounce. Both need the operator
+        # to re-establish the session in the open browser, then we re-fetch the page.
+        if manual:
+            kind = "CAPTCHA" if _looks_like_captcha(html) else "homepage bounce (session expired)"
+            print(colored(f"\n🔐 {kind} on {url}", "yellow", attrs=['bold']))
+            print(colored("   In the open browser: solve any CAPTCHA / let the homepage load so the "
+                          "session is valid again, then press Enter — I'll re-fetch this page.", "yellow"))
+            input(colored("   Press Enter to retry this page...", "yellow"))
+            continue  # next loop iteration re-does driver.get(url)
+
+        # Non-interactive: a couple of quiet retries for a transient bounce, else bail.
+        print(colored(f"   ↩️  {url} blocked (attempt {attempt+1}/{retries}); "
+                       f"{'retrying' if attempt < retries - 1 else 'giving up'}...", "yellow"))
+        time.sleep(2)
+    return html
+
+
+def scrape_category_page(session, category_url, driver=None, use_browser=False, manual=False):
+    """Scrape a category page and return all product links.
+
+    When use_browser is set (and a driver is supplied), the listing page is loaded
+    through the live browser instead of the requests session -- required for markets
+    that bounce deep ?page=N requests to the homepage. `manual` lets the browser path
+    pause for the operator to solve a mid-crawl CAPTCHA.
+    """
     print(colored(f"\n📄 Scraping category: {category_url}", "cyan"))
-    
-    html = fetch_page_html(session, category_url)
+
+    if use_browser and driver is not None:
+        html = fetch_page_html_browser(driver, category_url, manual=manual)
+    else:
+        html = fetch_page_html(session, category_url)
     if not html:
         print(colored(f"❌ Failed to fetch category page", "red"))
         return None, None
     
     product_links = extract_product_links(html, category_url)
     print(colored(f"✅ Found {len(product_links)} product links", "green"))
-    
+
+    # Diagnostic: if a category page yields no products, dump its HTML so we can
+    # see WHY (CAPTCHA / anti-bot block / empty list / JS-rendered listings).
+    if not product_links:
+        try:
+            debug_dir = DATA_DIR / "raw" / "_debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            host = urllib.parse.urlparse(category_url).netloc[:16]
+            stamp = time.strftime("%H%M%S")
+            debug_path = debug_dir / f"empty_{host}_{stamp}.html"
+            debug_path.write_text(html, encoding="utf-8")
+            looks_blocked = any(w in html.lower() for w in
+                                ('captcha', 'verify you', 'cloudflare', 'challenge', 'ddos', 'rate limit', 'too many'))
+            note = " (looks like a CAPTCHA/anti-bot page)" if looks_blocked else ""
+            print(colored(f"   🐞 0 products — saved page HTML to {debug_path}{note}", "magenta"))
+        except Exception as exc:
+            print(colored(f"   ⚠️  Could not write debug HTML: {exc}", "yellow"))
+
     # Also check for pagination
     soup = BeautifulSoup(html, 'html.parser')
     pagination_links = []
@@ -376,6 +470,18 @@ def main():
                             'already page-walked automatically from page 1 until an empty page, '
                             'so this flag is rarely needed; for a marker-less URL it just forces a '
                             'single-page crawl instead of following pagination links')
+    parser.add_argument('--single-page', action='store_true',
+                       help='Crawl each seed URL as exactly one page (no forward-walk, no '
+                            'pagination-following). Use with an explicit list of page URLs, e.g. '
+                            'drughub ?page=1 .. ?page=15.')
+    parser.add_argument('--workers', type=int, default=2,
+                       help='Number of product pages to fetch concurrently (default: 2). '
+                            'drughub allows ~2 simultaneous requests; raise for more lenient '
+                            'markets. 1 = fully sequential.')
+    parser.add_argument('--browser-categories', action='store_true',
+                       help='Fetch category/listing pages through the Selenium browser instead of '
+                            'the requests session. Needed for markets (e.g. drughub) that bounce '
+                            'deep ?page=N requests to the homepage over a plain requests session.')
 
     args = parser.parse_args()
     
@@ -509,7 +615,15 @@ def main():
             page_pat = find_page_pattern(category_url)
             walk_template = None
             walk_prev_sig = None
-            if page_pat is not None:
+            if args.single_page:
+                # Temporary mode: crawl each seed URL as exactly one page -- no
+                # forward-walk, no pagination-following. Lets you list explicit page
+                # URLs (e.g. ?page=1 .. ?page=15) and fetch each one singularly.
+                page_queue = [category_url]
+                follow_pagination = False
+                page_limit = None
+                print(colored("   --single-page → fetching this URL as one page only.", "yellow"))
+            elif page_pat is not None:
                 walk_template = page_pat[0]
                 page_queue = [page_url(walk_template, 1)]  # always start from page 1
                 follow_pagination = False
@@ -541,11 +655,15 @@ def main():
                 # Reuse the same session for the host
                 page_session = host_sessions.get(market_name) or session
 
-                product_links, pagination_links = scrape_category_page(page_session, current_page)
+                product_links, pagination_links = scrape_category_page(
+                    page_session, current_page, driver=driver,
+                    use_browser=args.browser_categories, manual=args.manual)
                 if product_links is None:
                     print(colored("⚠️  Retrying after refreshing session...", "yellow"))
                     page_session = refresh_session(current_page, "retry after failed fetch")
-                    product_links, pagination_links = scrape_category_page(page_session, current_page)
+                    product_links, pagination_links = scrape_category_page(
+                        page_session, current_page, driver=driver,
+                        use_browser=args.browser_categories, manual=args.manual)
                     if product_links is None:
                         print(colored("❌ Skipping page due to repeated fetch failures", "red", attrs=['bold']))
                         continue
@@ -578,38 +696,58 @@ def main():
 
                 all_product_links = set(product_links)
                 print(colored(f"\n📊 Products found on this page: {len(all_product_links)} (page {pages_scraped})", "green", attrs=['bold']))
-                
-                # Scrape each product page
-                for i, product_url in enumerate(all_product_links, 1):
+
+                # Build the work list: drop duplicates and ensure a session exists for
+                # each product host UP FRONT. Session setup uses Selenium (not thread
+                # safe), so it must happen here, serially, before any worker runs.
+                pending = []
+                for product_url in all_product_links:
                     if product_url in scraped_urls:
                         print(colored(f"  ⏭️  Skipping duplicate: {product_url}", "yellow"))
                         continue
-                    
-                    if args.max_products and len(all_products) >= args.max_products:
-                        print(colored(f"\n⚠️  Reached max products limit ({args.max_products})", "yellow"))
-                        break
-                    
-                    print(colored(f"  [{i}/{len(all_product_links)}]", "white"), end=" ")
-
                     product_host = urllib.parse.urlparse(product_url).netloc or market_name
                     if product_host not in host_sessions:
                         print(colored(f"\n🔄 New host detected for product ({product_host}). Opening browser...", "yellow"))
-                        product_session = establish_session(product_url, "product host session setup")
-                    else:
-                        product_session = host_sessions[product_host]
+                        establish_session(product_url, "product host session setup")
+                    pending.append((product_url, product_host))
 
-                    product_data = scrape_product_page(product_session, product_url, current_page, product_host)
-                    
-                    if product_data:
-                        all_products.append(product_data)
-                        scraped_urls.add(product_url)
-                        print(colored(f"    ✅ Saved (total: {len(all_products)})", "green"))
-                    else:
-                        print(colored(f"    ❌ Failed", "red"))
-                    
-                    # Delay between requests
+                # Respect the global max-products cap before fetching this batch.
+                if args.max_products:
+                    room = args.max_products - len(all_products)
+                    if room <= 0:
+                        break
+                    pending = pending[:room]
+
+                def fetch_one(item):
+                    """Fetch one product page (runs in a worker thread)."""
+                    p_url, p_host = item
+                    data = scrape_product_page(host_sessions[p_host], p_url, current_page, p_host)
+                    # Pace each worker so `--workers` concurrent streams stay polite.
                     time.sleep(args.delay + random.uniform(0, 1))
-            
+                    return p_url, data
+
+                def record(p_url, data):
+                    """Store a finished fetch (called only from the main thread)."""
+                    if data:
+                        all_products.append(data)
+                        scraped_urls.add(p_url)
+                        print(colored(f"    ✅ Saved {p_url} (total: {len(all_products)})", "green"))
+                    else:
+                        print(colored(f"    ❌ Failed {p_url}", "red"))
+
+                workers = max(1, args.workers)
+                if workers > 1 and len(pending) > 1:
+                    print(colored(f"  ⚙️  Fetching {len(pending)} products, {workers} at a time...", "blue"))
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        futures = {pool.submit(fetch_one, item): item for item in pending}
+                        for fut in as_completed(futures):
+                            p_url, data = fut.result()
+                            record(p_url, data)  # main thread → no lock needed
+                else:
+                    for item in pending:
+                        p_url, data = fetch_one(item)
+                        record(p_url, data)
+
             if args.max_products and len(all_products) >= args.max_products:
                 break
         
