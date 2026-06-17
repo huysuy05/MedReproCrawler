@@ -285,6 +285,7 @@ def fetch_page_html_browser(driver, url, settle=3.0, retries=5, manual=False):
     NOT thread-safe (one WebDriver), so only the serialized category-page path may
     call it -- never the product worker threads.
     """
+    html = None
     for attempt in range(retries):
         try:
             driver.get(url)
@@ -296,12 +297,33 @@ def fetch_page_html_browser(driver, url, settle=3.0, retries=5, manual=False):
         except WebDriverException as exc:
             print(colored(f"⚠️  Browser fetch failed for {url}: {exc}", "yellow"))
             return None
+        except Exception as exc:
+            # e.g. urllib3 ReadTimeoutError: the Selenium client→geckodriver call
+            # hit its OWN (shorter) timeout while a slow Tor page was still loading.
+            # Never let one slow page crash the whole crawl -- stop the load, read
+            # whatever rendered, else retry.
+            print(colored(f"   ⏱️  {type(exc).__name__} on {url} (attempt {attempt+1}/{retries}); "
+                          "stopping load and retrying...", "yellow"))
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
         if settle > 0:
             time.sleep(settle)
-        html = driver.page_source
+        try:
+            html = driver.page_source
+        except Exception:
+            html = None
 
-        if not _looks_like_captcha(html) and not _looks_like_bounce(html):
+        if html and not _looks_like_captcha(html) and not _looks_like_bounce(html):
             return html  # got the real page
+
+        # No usable content this attempt (client timeout / blank page) → retry.
+        if not html:
+            print(colored(f"   ↩️  No page content (attempt {attempt+1}/{retries}); "
+                           f"{'retrying' if attempt < retries - 1 else 'giving up'}...", "yellow"))
+            time.sleep(2)
+            continue
 
         # Stale session: CAPTCHA challenge or homepage bounce. Both need the operator
         # to re-establish the session in the open browser, then we re-fetch the page.
