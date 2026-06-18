@@ -60,6 +60,14 @@ def extract_market_name(soup):
         if ' - THE X WAVE MARKET' in title_text:
             return "THE X WAVE MARKET"
 
+        # Pattern for Osiris Market: "Osiris - Product - <name>"
+        if title_text.startswith('Osiris -'):
+            return "Osiris"
+
+        # Pattern for Carthasis Market: "<name> - <vendor> - Catharsis"
+        if title_text.endswith('- Catharsis') or ' - Catharsis' in title_text:
+            return "Catharsis"
+
         # Pattern for Black Ops: "Product «...» - Black Ops" (plain hyphen, so the
         # generic em-dash/pipe splitters below miss it).
         if title_text.endswith('- Black Ops') or ' - Black Ops' in title_text:
@@ -126,6 +134,13 @@ def extract_listing_title(soup):
     #    listing title only lives in <title> as "Drug Hub - <product>".
     if title_text.startswith('Drug Hub - '):
         product = clean_text(title_text[len('Drug Hub - '):])
+        if product:
+            return product
+
+    # 1b. Osiris Market: title is "Osiris - Product - <name>"; the generic dash
+    #     splitter below would otherwise cut it down to just "Osiris".
+    if title_text.startswith('Osiris - Product - '):
+        product = clean_text(title_text[len('Osiris - Product - '):])
         if product:
             return product
 
@@ -484,6 +499,8 @@ def is_product_url(url):
       - most WooCommerce shops:  /product/<slug>/
       - Emotive / Apex / SHADOWGATE:  /shop/<slug>/
       - Drug Hub:  /listing/<id>/...
+      - Carthasis:  /item/<uuid>
+      - Osiris:  /product/<uuid>  (covered by the /product/ rule above)
       - TorZon:  /products.php?action=view&...
 
     Anything with an ``add-to-cart`` param, a ``product_cat`` category listing,
@@ -512,6 +529,10 @@ def is_product_url(url):
 
     # Drug Hub listing pages: /listing/<id>/...
     if 'listing' in segments:
+        return True
+
+    # Carthasis Market product pages: /item/<uuid>
+    if 'item' in segments and segments.index('item') + 1 < len(segments):
         return True
 
     # TorZon custom PHP market: /products.php?action=view

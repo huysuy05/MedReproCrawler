@@ -28,9 +28,13 @@ DEFAULT_JSON = [
     DATA_DIR / "filtered" / "filtered_medicines.json",
     DATA_DIR / "filtered" / "filtered_torzon_medicines.json",
 ]
+# The LLM-evaluated variant (evaluate_llm.py). Pushed to its OWN worksheet via
+# --llm so the keyword-only version stays intact for side-by-side comparison.
+LLM_JSON = [DATA_DIR / "filtered" / "filtered_medicines_llm.json"]
 DEFAULT_CREDENTIALS = BASE_DIR / "credentials" / "service_account.json"
 DEFAULT_SHEET_ID = "1mZp58VNB1qR2A5SsKApvuOMAtZV7tUF1EOOHBqKSsUM"
 DEFAULT_WORKSHEET = "Listings"
+LLM_WORKSHEET = "Listings (LLM)"
 
 # Column order written to the sheet. Mirrors filter_medicines.PREFERRED_HEADERS
 # plus the match metadata the filter appends. The category / ship_from / ship_to
@@ -49,6 +53,11 @@ COLUMNS: List[str] = [
     "ship_to",
     "matched_terms",
     "matched_categories",
+    "llm_relevant",
+    "llm_category",
+    "llm_product_type",
+    "llm_confidence",
+    "llm_reason",
     "original_url",
     "category_page",
     "fetched_at",
@@ -98,20 +107,33 @@ def push(rows: List[List[str]], credentials: Path, sheet_id: str, worksheet_name
 
 def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--json-input", "-j", type=Path, nargs="+", default=DEFAULT_JSON,
+    parser.add_argument("--llm", action="store_true",
+                        help="Push the LLM-evaluated variant (filtered_medicines_llm.json) to its "
+                             f"own '{LLM_WORKSHEET}' tab, leaving the keyword-only '{DEFAULT_WORKSHEET}' "
+                             "tab intact for comparison.")
+    # Defaults are resolved in main() so --llm can switch them; explicit flags win.
+    parser.add_argument("--json-input", "-j", type=Path, nargs="+", default=None,
                         help="One or more filtered listings JSON files; their listings are "
-                             "concatenated into a single sheet (default: merged + TorZon)")
+                             "concatenated into a single sheet (default: merged + TorZon, or the "
+                             "LLM variant with --llm)")
     parser.add_argument("--credentials", "-c", type=Path, default=DEFAULT_CREDENTIALS,
                         help=f"Service account JSON key (default: {DEFAULT_CREDENTIALS})")
     parser.add_argument("--sheet-id", default=DEFAULT_SHEET_ID,
                         help="Target spreadsheet ID (the long token in its URL)")
-    parser.add_argument("--worksheet", "-w", default=DEFAULT_WORKSHEET,
-                        help=f"Worksheet/tab name (default: {DEFAULT_WORKSHEET})")
+    parser.add_argument("--worksheet", "-w", default=None,
+                        help=f"Worksheet/tab name (default: {DEFAULT_WORKSHEET!r}, or "
+                             f"{LLM_WORKSHEET!r} with --llm)")
     return parser.parse_args(argv)
 
 
 def main(argv: List[str] | None = None) -> None:
     args = parse_args(argv)
+    # Resolve --llm-aware defaults (explicit --json-input / --worksheet still win).
+    if args.json_input is None:
+        args.json_input = LLM_JSON if args.llm else DEFAULT_JSON
+    if args.worksheet is None:
+        args.worksheet = LLM_WORKSHEET if args.llm else DEFAULT_WORKSHEET
+
     if not args.credentials.exists():
         raise SystemExit(
             f"Service account key not found at {args.credentials}. "
@@ -128,6 +150,14 @@ def main(argv: List[str] | None = None) -> None:
         listings.extend(chunk)
     if not listings:
         raise SystemExit("No listings found in any input file; nothing to push.")
+
+    # The --llm tab is the cleaned set: only push listings the LLM approved.
+    if args.llm:
+        before = len(listings)
+        listings = [item for item in listings if item.get("llm_relevant") is True]
+        print(f"  --llm → keeping {len(listings)} approved of {before} evaluated")
+        if not listings:
+            raise SystemExit("No LLM-approved listings to push (did you run evaluate_llm.py?).")
 
     rows = build_rows(listings)
     url = push(rows, args.credentials, args.sheet_id, args.worksheet)

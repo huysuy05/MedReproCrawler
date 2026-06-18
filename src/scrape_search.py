@@ -14,6 +14,13 @@ keyword in data/config/search_keywords.json, and for each selected market, it:
 Supported markets (see MARKETS registry):
   - drughub : /?search_terms=<term>&search=simple ; count in <h1 class="h2 m-0 mb-1">
   - xwave   : /?s=<term>&post_type=product        ; count in <p class="woocommerce-result-count">
+  - mondial : /?s=<term>&post_type=product        ; count in <p class="woocommerce-result-count">
+  - apex    : /?s=<term>&post_type=product        ; count in <p class="woocommerce-result-count">
+  - emotive : /?s=<term>                          ; NO result count → gate on product links
+  - carthasis: /search?title=<term>&source=&destination ; NO result count → gate on product links
+  - apocalypse: /search?q=<term>                   ; NO result count → gate on product links
+  - osiris  : /search?query=<term>                ; count in "Fetched N results" text
+  - prime   : /search?q=<term>                     ; NO result count → gate on product links
 
 Output is written in the SAME raw record format and `products_html_<timestamp>.json`
 naming as scrape_simple.py, so the existing pipeline picks it up with no changes:
@@ -56,6 +63,7 @@ from scrape_simple import (
     extract_product_links,
     scrape_product_page,
     save_products_html,
+    _looks_like_captcha,
 )
 
 
@@ -91,6 +99,24 @@ def parse_count_drughub(html):
         digits = strong.get_text().strip().replace(",", "")
         if digits.isdigit():
             return int(digits)
+    return None
+
+
+def parse_count_osiris(html):
+    """Result count for Osiris Market.
+
+    Results page shows "...Fetched 72 results in 4.8 seconds" in a <p>; the
+    no-results page shows "Couldn't find any results for that query...". Match on
+    the text (apostrophe-agnostic) so themes/encodings don't matter. None = unknown.
+    """
+    if not html:
+        return None
+    low = html.lower()
+    if "find any results for that query" in low:
+        return 0
+    m = re.search(r"fetched\s+([\d,]+)\s+results", low)
+    if m:
+        return int(m.group(1).replace(",", ""))
     return None
 
 
@@ -139,12 +165,69 @@ def _drughub_search_url(base, term, page):
     return url
 
 
-def _xwave_search_url(base, term, page):
-    # WooCommerce query-string search paginates via /page/N/.
+def _woocommerce_search_url(base, term, page):
+    # Standard WooCommerce product search: ?s=<term>&post_type=product, paginated
+    # via /page/N/. Shared by X Wave and Pharmacy Mondial.
     q = f"?s={urllib.parse.quote(term)}&post_type=product"
     if page > 1:
         return f"{base}/page/{page}/{q}"
     return f"{base}/{q}"
+
+
+def _emotive_search_url(base, term, page):
+    # WooCommerce ?s= search WITHOUT post_type (per the market's URL); paginates
+    # via /page/N/. extract_product_links still keeps only product cards.
+    q = f"?s={urllib.parse.quote(term)}"
+    if page > 1:
+        return f"{base}/page/{page}/{q}"
+    return f"{base}/{q}"
+
+
+def _carthasis_search_url(base, term, page):
+    # Custom market: /search?title=<term>&source=&destination. Pagination param is
+    # an assumption (&page=N) -- verify on first live run; the repeat-page guard
+    # stops safely if it's wrong.
+    url = f"{base}/search?title={urllib.parse.quote(term)}&source=&destination"
+    if page > 1:
+        url += f"&page={page}"
+    return url
+
+
+def _search_q_url(base, term, page):
+    # Custom market search: /search?q=<term>. Pagination param assumed (&page=N) --
+    # verify on first live run; the repeat-page guard stops safely if it's wrong.
+    # Shared by Apocalypse and Prime.
+    url = f"{base}/search?q={urllib.parse.quote(term)}"
+    if page > 1:
+        url += f"&page={page}"
+    return url
+
+
+def _osiris_search_url(base, term, page):
+    # Custom market: /search?query=<term>. Pagination param assumed (&page=N).
+    url = f"{base}/search?query={urllib.parse.quote(term)}"
+    if page > 1:
+        url += f"&page={page}"
+    return url
+
+
+def _usable_results_page(html, market=None):
+    """Heuristic for COUNT-LESS markets: does this look like a fully-rendered
+    search page (0 or many results) rather than a blank/stub/blocked response?
+    Lets us trust "0 product links == no results" only on a real page.
+
+    If the market defines a ``valid_page_marker`` (a substring present on every
+    one of its search pages), require it. Otherwise fall back to a market-agnostic
+    check: a substantial, non-CAPTCHA page.
+    """
+    if not html or len(html) < 1000:
+        return False
+    if _looks_like_captcha(html):
+        return False
+    marker = getattr(market, "valid_page_marker", None)
+    if marker:
+        return marker.lower() in html.lower()
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -157,7 +240,16 @@ class Market:
     name: str                                 # human label
     base: str                                 # onion root URL (no trailing slash)
     search_url: Callable[[str, str, int], str]  # (base, term, page) -> URL
-    count_parser: Callable[[str], Optional[int]]  # (html) -> int | None
+    # (html) -> int | None. None means the market shows NO result count, so the
+    # crawl gates on extracted product links instead (see crawl_search_term).
+    count_parser: Optional[Callable[[str], Optional[int]]] = None
+    # For count-less markets: a substring present on every valid search page, used
+    # to confirm a 0-link page is genuinely empty (not blank/blocked). Optional.
+    valid_page_marker: Optional[str] = None
+    # Fetch product pages through the live browser instead of the requests session.
+    # Needed for markets that drop/anti-bot the plain requests session (e.g.
+    # Carthasis: RemoteDisconnected on /item/ pages). Forces sequential fetching.
+    browser_products: bool = False
 
     @property
     def host(self):
@@ -176,8 +268,66 @@ MARKETS = {
         key="xwave",
         name="The X Wave Market",
         base="http://hs7mhjhab5tpowkgmk5hrholfcdmgedp73hr6czrsrbr2kopzbrv3byd.onion",
-        search_url=_xwave_search_url,
+        search_url=_woocommerce_search_url,
         count_parser=parse_count_woocommerce,
+    ),
+    "mondial": Market(
+        key="mondial",
+        name="Pharmacy Mondial Market",
+        base="http://mond5tycmmi52mkvqi32bpadj3nr3skkfwtjjdv5n57i7tfej5paf5qd.onion",
+        search_url=_woocommerce_search_url,   # ?s=<term>&post_type=product
+        count_parser=parse_count_woocommerce,  # standard WooCommerce result count
+    ),
+    "apex": Market(
+        key="apex",
+        name="Apex Chemicals",
+        base="http://apexizhvctxtrsqcz2dybpnvib2s3567djjbyd7ayehzzbsey2doj2yd.onion",
+        search_url=_woocommerce_search_url,   # ?s=<term>&post_type=product
+        count_parser=parse_count_woocommerce,  # standard WooCommerce result count
+    ),
+    "emotive": Market(
+        key="emotive",
+        name="Emotive Drugstore",
+        base="http://drugj7dwjgdxyrqlciswny7ioa6wt2bbljifqspw2mg2cxv4n36ihcyd.onion",
+        search_url=_emotive_search_url,
+        count_parser=None,  # no result-count element → gate on product links
+        valid_page_marker="woocommerce",
+    ),
+    "carthasis": Market(
+        key="carthasis",
+        name="Carthasis Market",
+        base="https://catharibrmbuat2is36fef24gqf3rzcmkdy6llybjyxzrqthzx7o3oyd.onion",
+        search_url=_carthasis_search_url,
+        count_parser=None,  # no result-count element → gate on product links
+        # Custom (non-WooCommerce) market: no known per-page marker yet, so the
+        # generic substantial+non-CAPTCHA fallback applies. Set this once we see a
+        # real search page (e.g. the site name) to tighten the empty-vs-blocked check.
+        valid_page_marker=None,
+        browser_products=True,  # /item/ pages drop the requests session → use browser
+    ),
+    "apocalypse": Market(
+        key="apocalypse",
+        name="Apocalypse Market",
+        base="http://apocam5hnoqskkmhr325nivjuh5phbmmggadxgcjabzzirap5iklkxad.onion",
+        search_url=_search_q_url,
+        count_parser=None,  # no result-count element → gate on product links
+        valid_page_marker=None,  # set once we see a real search page, to tighten
+    ),
+    "prime": Market(
+        key="prime",
+        name="Prime Market",
+        base="https://prime3dwpxzq75rqt2dnuaywvlldjrm645kdkj4zumx2cpgmsjxvhjqd.onion",
+        search_url=_search_q_url,
+        count_parser=None,  # no result-count element → gate on product links
+        valid_page_marker=None,  # set once we see a real search page, to tighten
+        browser_products=True,  # product pages are empty JS shells over requests → use browser
+    ),
+    "osiris": Market(
+        key="osiris",
+        name="Osiris Market",
+        base="http://osirisdaec7ufbb3sbe3r355b2s7lwvw726l4z4oumg6kdddnomht3qd.onion",
+        search_url=_osiris_search_url,
+        count_parser=parse_count_osiris,  # "Fetched N results" / no-results text
     ),
 }
 
@@ -259,6 +409,7 @@ def crawl_search_term(driver, session, market, term, args, scraped_urls, all_pro
     walk_prev_sig = None
     page = 1
     count = None
+    use_browser_products = args.browser_products or market.browser_products
 
     while page <= WALK_PAGE_CAP:
         search_page_url = market.search_url(market.base, term, page)
@@ -269,8 +420,8 @@ def crawl_search_term(driver, session, market, term, args, scraped_urls, all_pro
             print(colored(f"❌ Failed to fetch search page {page} for {term!r}", "red"))
             return False  # transient → retry next run
 
-        # First page: gate the whole term on the reported result count.
-        if page == 1:
+        # First page: if the market reports a result count, gate on it.
+        if page == 1 and market.count_parser is not None:
             count = market.count_parser(html)
             if count is None:
                 print(colored(f"   ⚠️  Could not read a result count for {term!r} — will retry next run.", "yellow"))
@@ -287,9 +438,18 @@ def crawl_search_term(driver, session, market, term, args, scraped_urls, all_pro
         # stop on an empty page or one that repeats the previous page's link set.
         sig = frozenset(product_links)
         if not product_links:
-            if page == 1 and count:
-                # Count said there are results but we extracted none — almost
-                # certainly a selector mismatch. Don't checkpoint; surface it.
+            if page == 1:
+                if market.count_parser is None:
+                    # Count-less market (e.g. Emotive): 0 links could be a genuine
+                    # no-result search OR a blank/blocked page. Only trust "no
+                    # results" if the page actually looks like a rendered search page.
+                    if _usable_results_page(html, market):
+                        print(colored("   ⏭️  No matching products on a valid search page → done.", "yellow"))
+                        return True
+                    print(colored("   ⚠️  0 links and page didn't look like a results page — "
+                                  "will retry next run.", "yellow"))
+                    return False
+                # Count market said >0 but we extracted none → selector mismatch.
                 print(colored(f"   ⚠️  {count} listed but 0 links extracted — not marking done.", "yellow"))
                 return False
             print(colored("   ⛔ Empty page → end of results.", "yellow"))
@@ -309,7 +469,20 @@ def crawl_search_term(driver, session, market, term, args, scraped_urls, all_pro
             pending.append(product_url)
 
         def fetch_one(p_url):
-            data = scrape_product_page(session, p_url, search_page_url, market.host)
+            if use_browser_products:
+                # Browser carries the live session; needed where the requests
+                # session is dropped/anti-botted. driver is NOT thread-safe, so
+                # this path always runs sequentially (workers forced to 1 below).
+                html = fetch_page_html_browser(driver, p_url, manual=args.manual)
+                data = {
+                    "market": market.host,
+                    "category_page": search_page_url,
+                    "product_url": p_url,
+                    "fetched_at": int(time.time()),
+                    "html": html,
+                } if html else None
+            else:
+                data = scrape_product_page(session, p_url, search_page_url, market.host)
             time.sleep(args.delay + random.uniform(0, 1))
             return p_url, data
 
@@ -321,7 +494,8 @@ def crawl_search_term(driver, session, market, term, args, scraped_urls, all_pro
             else:
                 print(colored(f"    ❌ Failed {p_url}", "red"))
 
-        workers = max(1, args.workers)
+        # Browser fetching must be serial (single WebDriver); requests can parallelise.
+        workers = 1 if use_browser_products else max(1, args.workers)
         if workers > 1 and len(pending) > 1:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {pool.submit(fetch_one, p): p for p in pending}
@@ -448,6 +622,10 @@ def parse_args():
                         help="Leave Firefox open at the end")
     parser.add_argument("--max-products", type=int, default=None,
                         help="Global cap on products scraped (default: unlimited)")
+    parser.add_argument("--browser-products", action="store_true",
+                        help="Fetch product pages through the browser instead of the requests "
+                             "session (forces sequential). Use for markets that drop the requests "
+                             "session; some markets enable this by default.")
     # Search-specific
     parser.add_argument("--keywords", type=Path, default=KEYWORDS_FILE,
                         help=f"Keywords JSON (default: {KEYWORDS_FILE})")
