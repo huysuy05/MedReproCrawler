@@ -272,6 +272,16 @@ def _looks_like_captcha(html):
         any(w in low for w in ('captcha', 'verify you are human', 'cloudflare', 'ddos-guard', 'are you human'))
 
 
+def _looks_like_ddos_block(html):
+    """True for anti-DDoS 'kill switch' block pages that ask for a new Tor identity
+    (e.g. Abacus: "Ddos protection kill switch. Please get a new Tor identity...").
+    These need a fresh circuit, not a CAPTCHA solve."""
+    if not html:
+        return False
+    low = html.lower()
+    return any(w in low for w in ('ddos protection', 'new tor identity', 'kill switch'))
+
+
 def fetch_page_html_browser(driver, url, settle=3.0, retries=5, manual=False):
     """Fetch a page through the live Selenium browser (carries JS cookies/tokens),
     returning driver.page_source. Used for markets that reject deep pagination over
@@ -315,7 +325,8 @@ def fetch_page_html_browser(driver, url, settle=3.0, retries=5, manual=False):
         except Exception:
             html = None
 
-        if html and not _looks_like_captcha(html) and not _looks_like_bounce(html):
+        if (html and not _looks_like_captcha(html) and not _looks_like_bounce(html)
+                and not _looks_like_ddos_block(html)):
             return html  # got the real page
 
         # No usable content this attempt (client timeout / blank page) → retry.
@@ -325,13 +336,20 @@ def fetch_page_html_browser(driver, url, settle=3.0, retries=5, manual=False):
             time.sleep(2)
             continue
 
-        # Stale session: CAPTCHA challenge or homepage bounce. Both need the operator
-        # to re-establish the session in the open browser, then we re-fetch the page.
+        # Stale session / anti-bot. CAPTCHA + bounce need a re-solve/re-auth; the
+        # DDoS kill switch needs a brand-new Tor circuit. With --manual, pause so the
+        # operator can fix it in the open browser, then we re-fetch the page.
         if manual:
-            kind = "CAPTCHA" if _looks_like_captcha(html) else "homepage bounce (session expired)"
-            print(colored(f"\n🔐 {kind} on {url}", "yellow", attrs=['bold']))
-            print(colored("   In the open browser: solve any CAPTCHA / let the homepage load so the "
-                          "session is valid again, then press Enter — I'll re-fetch this page.", "yellow"))
+            if _looks_like_ddos_block(html):
+                print(colored(f"\n🛡️  Anti-DDoS kill switch on {url}", "yellow", attrs=['bold']))
+                print(colored("   In Tor Browser: get a NEW identity / new circuit for this site "
+                              "(hamburger menu → 'New Tor Circuit for this Site', or 🧅 → 'New Identity'), "
+                              "wait for the page to load normally, then press Enter — I'll re-fetch.", "yellow"))
+            else:
+                kind = "CAPTCHA" if _looks_like_captcha(html) else "homepage bounce (session expired)"
+                print(colored(f"\n🔐 {kind} on {url}", "yellow", attrs=['bold']))
+                print(colored("   In the open browser: solve any CAPTCHA / let the homepage load so the "
+                              "session is valid again, then press Enter — I'll re-fetch this page.", "yellow"))
             input(colored("   Press Enter to retry this page...", "yellow"))
             continue  # next loop iteration re-does driver.get(url)
 

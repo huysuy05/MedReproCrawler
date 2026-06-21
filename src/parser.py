@@ -144,6 +144,14 @@ def extract_listing_title(soup):
         if product:
             return product
 
+    # 1c. Abacus Market: every product-page <h1> is a sidebar heading ("About
+    #     Vendor", "Listing Options", ...), so the generic h1 fallback grabs junk.
+    #     The real title lives in <title> as "<name> | Abacus Market".
+    if ' | Abacus Market' in title_text:
+        product = clean_text(title_text.split(' | Abacus Market')[0])
+        if product:
+            return product
+
     # 2. Black Ops: custom template, title in a dedicated div (no h1). Checked
     #    before the generic title splitters because the title contains hyphens.
     blackops = soup.select_one('.product_pg_r_title')

@@ -21,6 +21,9 @@ Supported markets (see MARKETS registry):
   - apocalypse: /search?q=<term>                   ; NO result count → gate on product links
   - osiris  : /search?query=<term>                ; count in "Fetched N results" text
   - prime   : /search?q=<term>                     ; NO result count → gate on product links
+  - darkbay : /results?q=<term>                     ; NO result count → gate on product links
+  - abacus  : /search?adv=on&s_terms=<term>&...     ; count in "Found N results." text
+  - wethenorth: /items.php?q=<term>                 ; NO result count → gate on product links
 
 Output is written in the SAME raw record format and `products_html_<timestamp>.json`
 naming as scrape_simple.py, so the existing pipeline picks it up with no changes:
@@ -120,6 +123,17 @@ def parse_count_osiris(html):
     return None
 
 
+def parse_count_abacus(html):
+    """Result count for Abacus Market: "Found <b>1616</b> results." None=unknown."""
+    if not html:
+        return None
+    text = " ".join(BeautifulSoup(html, "html.parser").get_text(" ").split())
+    m = re.search(r"found\s+([\d,]+)\s+results", text, re.I)
+    if m:
+        return int(m.group(1).replace(",", ""))
+    return None
+
+
 def parse_count_woocommerce(html):
     """Result count from WooCommerce's `<p class="woocommerce-result-count">` text.
 
@@ -206,6 +220,34 @@ def _search_q_url(base, term, page):
 def _osiris_search_url(base, term, page):
     # Custom market: /search?query=<term>. Pagination param assumed (&page=N).
     url = f"{base}/search?query={urllib.parse.quote(term)}"
+    if page > 1:
+        url += f"&page={page}"
+    return url
+
+
+def _darkbay_search_url(base, term, page):
+    # Custom market: /results?q=<term>. Pagination param assumed (&page=N).
+    url = f"{base}/results?q={urllib.parse.quote(term)}"
+    if page > 1:
+        url += f"&page={page}"
+    return url
+
+
+def _wethenorth_search_url(base, term, page):
+    # Custom market: /items.php?q=<term>. Pagination param assumed (&page=N).
+    url = f"{base}/items.php?q={urllib.parse.quote(term)}"
+    if page > 1:
+        url += f"&page={page}"
+    return url
+
+
+def _abacus_search_url(base, term, page):
+    # Custom market advanced search: term goes in s_terms, all other filter params
+    # kept verbatim (s_stock=1 = in-stock only). Pagination param assumed (&page=N).
+    q = (f"search?adv=on&s_terms={urllib.parse.quote(term)}&s_sellername=&s_order=0"
+         "&s_tocountryid=0&s_countryid=0&s_category=All&s_lphysical=0&s_minprice=0.00"
+         "&s_maxprice=99999.99&s_crypto=0&s_fulfill=2&s_multisig=0&s_bulk=2&s_stock=1&s_payment=0")
+    url = f"{base}/{q}"
     if page > 1:
         url += f"&page={page}"
     return url
@@ -328,6 +370,29 @@ MARKETS = {
         base="http://osirisdaec7ufbb3sbe3r355b2s7lwvw726l4z4oumg6kdddnomht3qd.onion",
         search_url=_osiris_search_url,
         count_parser=parse_count_osiris,  # "Fetched N results" / no-results text
+    ),
+    "darkbay": Market(
+        key="darkbay",
+        name="Darkbay Market",
+        base="http://darkbayx7a4sosoo4hqvoljqelgkusjlrqmt237ls6hndbplmel55oad.onion",
+        search_url=_darkbay_search_url,   # /results?q=<term>
+        count_parser=None,  # no result-count given → gate on product links
+        valid_page_marker=None,
+    ),
+    "abacus": Market(
+        key="abacus",
+        name="Abacus Market",
+        base="http://abacus2uqpal6hlep5pobtsue4tcr2nyekwuq27t4p7yqvy46hnplmyd.onion",
+        search_url=_abacus_search_url,   # /search?adv=on&s_terms=<term>&...
+        count_parser=parse_count_abacus,  # "Found N results."
+    ),
+    "wethenorth": Market(
+        key="wethenorth",
+        name="WeTheNorth Market",
+        base="http://hn2paw7zaahbikbejiv6h22zwtijlam65y2c77xj2ypbilm2xs4bnbid.onion",
+        search_url=_wethenorth_search_url,   # /items.php?q=<term>
+        count_parser=None,  # no result-count given → gate on product links
+        valid_page_marker=None,
     ),
 }
 

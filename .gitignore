@@ -6,3 +6,7 @@ myenv
 config
 credentials
 *.bak*
+
+# Regenerable merge artifact -- rebuilt by merge_html_sessions.py from data/raw/.
+# Excluded from git/LFS because it exceeds GitHub LFS's 2 GB per-file limit.
+data/merged/products_html_merged.json
