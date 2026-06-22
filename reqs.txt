@@ -6,3 +6,4 @@ termcolor
 gspread
 google-auth
 ijson
+matplotlib

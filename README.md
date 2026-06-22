@@ -127,6 +127,26 @@ Review `data/category_candidates.csv` (✔ = flagged relevant); only relevant ca
   - fetched_at (unix timestamp)
   - html (full HTML string)
 
+## Category-share chart (after `evaluate_llm.py`)
+
+`src/build_category_share.py` renders a donut showing what fraction of **all products
+fetched** are confirmed abortion or contraception listings. Run it after
+`evaluate_llm.py` (order relative to `push_to_sheets.py` doesn't matter).
+
+```bash
+python src/build_category_share.py
+```
+
+- **Numerator:** LLM-approved listings (`data/filtered/filtered_medicines_llm.json`,
+  `llm_relevant == true`), split into abortion vs. contraception.
+- **Denominator:** every distinct product parsed (`data/parsed/parsed_merged.json` +
+  `data/parsed/parsed-torzone.json`, deduped by `original_url`).
+- **Outputs (overwritten each run, it's a snapshot not a time series):**
+  - `data/analytics/category_share.png` — donut: Abortion / Contraception / Other, with
+    the combined share % in the center.
+  - `data/analytics/category_share.csv` — one-row counts summary.
+- `--no-chart` writes the summary only; `--denominator <files...>` overrides the total set.
+
 ## Editing `pages_url.json`
 
 - `pages_url.json` must be a valid JSON array of ASCII URLs. Keep the list explicit — the scraper will only visit the URLs listed. To add numeric ranges programmatically, generate the URLs and overwrite `pages_url.json`.
