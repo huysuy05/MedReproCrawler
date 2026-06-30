@@ -18,7 +18,6 @@ Supported markets (see MARKETS registry):
   - apex    : /?s=<term>&post_type=product        ; count in <p class="woocommerce-result-count">
   - emotive : /?s=<term>                          ; NO result count → gate on product links
   - carthasis: /search?title=<term>&source=&destination ; NO result count → gate on product links
-  - apocalypse: /search?q=<term>                   ; NO result count → gate on product links
   - osiris  : /search?query=<term>                ; count in "Fetched N results" text
   - prime   : /search?q=<term>                     ; NO result count → gate on product links
   - darkbay : /results?q=<term>                     ; NO result count → gate on product links
@@ -210,7 +209,7 @@ def _carthasis_search_url(base, term, page):
 def _search_q_url(base, term, page):
     # Custom market search: /search?q=<term>. Pagination param assumed (&page=N) --
     # verify on first live run; the repeat-page guard stops safely if it's wrong.
-    # Shared by Apocalypse and Prime.
+    # Used by Prime.
     url = f"{base}/search?q={urllib.parse.quote(term)}"
     if page > 1:
         url += f"&page={page}"
@@ -346,14 +345,6 @@ MARKETS = {
         # real search page (e.g. the site name) to tighten the empty-vs-blocked check.
         valid_page_marker=None,
         browser_products=True,  # /item/ pages drop the requests session → use browser
-    ),
-    "apocalypse": Market(
-        key="apocalypse",
-        name="Apocalypse Market",
-        base="http://apocam5hnoqskkmhr325nivjuh5phbmmggadxgcjabzzirap5iklkxad.onion",
-        search_url=_search_q_url,
-        count_parser=None,  # no result-count element → gate on product links
-        valid_page_marker=None,  # set once we see a real search page, to tighten
     ),
     "prime": Market(
         key="prime",
@@ -659,8 +650,10 @@ def open_market_session(driver, market, args):
 def parse_args():
     parser = argparse.ArgumentParser(description="Keyword-search crawler for dark web marketplaces")
     # Market selection
-    parser.add_argument("--market", choices=list(MARKETS) + ["all"], default="all",
-                        help="Which market(s) to search (default: all)")
+    parser.add_argument("--market", default="all",
+                        help="Which market(s) to search: 'all', a single market key, or a "
+                             "comma-separated list to run just those in order "
+                             f"(e.g. prime,osiris,darkbay). Choices: {', '.join(MARKETS)}. Default: all")
     # Shared with scrape_simple.py
     parser.add_argument("--manual", action="store_true",
                         help="Open browser and pause for manual CAPTCHA solving on each search")
@@ -707,7 +700,15 @@ def parse_args():
 
 def main():
     args = parse_args()
-    selected = list(MARKETS) if args.market == "all" else [args.market]
+    if args.market == "all":
+        selected = list(MARKETS)
+    else:
+        selected = [m.strip() for m in args.market.split(",") if m.strip()]
+        unknown = [m for m in selected if m not in MARKETS]
+        if unknown:
+            print(colored(f"❌ Unknown market(s): {', '.join(unknown)}. "
+                          f"Valid: {', '.join(MARKETS)}, all", "red"))
+            return
 
     # Resolve the term list (shared across markets).
     if args.terms:

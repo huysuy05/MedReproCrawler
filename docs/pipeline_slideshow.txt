@@ -1,0 +1,93 @@
+================================================================================
+ DARKWEB MEDICINE-ACCESS PIPELINE
+================================================================================
+
+
+--------------------------------------------------------------------------------
+ SLIDE 1 - THE GOAL
+--------------------------------------------------------------------------------
+
+ Measure how available contraception and abortion medicines are across dark web
+ (.onion) marketplaces.
+
+ We search markets by drug name, scrape the matching listings, clean and verify
+ them, and publish a trustworthy list to a Google Sheet plus a summary chart.
+
+
+--------------------------------------------------------------------------------
+ SLIDE 2 - THE PIPELINE IN ONE PICTURE
+--------------------------------------------------------------------------------
+
+   CRAWL  ->  MERGE  ->  PARSE  ->  FILTER  ->  LLM  ->  SHEETS  ->  CHART
+
+   Each step does one job and hands a clean file to the next.
+   The data narrows at every step: many pages in, a few confirmed listings out.
+
+
+--------------------------------------------------------------------------------
+ SLIDE 3 - CRAWL  (scrape_search.py)
+--------------------------------------------------------------------------------
+
+ Search each market by keyword and scrape every matching product page.
+
+ - Keywords come from a config file (contraception + abortion drug names).
+ - An operator drives the Tor browser and solves CAPTCHAs; the rest is automated.
+ - New markets are added with a single registry entry (URL + how to read results).
+
+   Output: raw product HTML, one file per run.
+
+
+--------------------------------------------------------------------------------
+ SLIDE 4 - MERGE + PARSE  (merge_html_sessions.py, parser.py)
+--------------------------------------------------------------------------------
+
+ MERGE: combine all crawl runs into one file, dropping duplicate products.
+
+ PARSE: turn messy HTML into clean records -- market, title, price, dosage,
+ stock, description, URL. Non-listing pages (carts, category indexes) are skipped.
+
+   Output: a structured list of products.
+
+
+--------------------------------------------------------------------------------
+ SLIDE 5 - FILTER  (filter_medicines.py)
+--------------------------------------------------------------------------------
+
+ Keep only listings that mention a target medicine, tagged by category
+ (contraception / abortion).
+
+ This is a wide net on purpose -- it catches everything relevant, but also some
+ false positives (e.g. a steroid that just mentions "estrogen").
+
+
+--------------------------------------------------------------------------------
+ SLIDE 6 - LLM CHECK  (evaluate_llm.py)
+--------------------------------------------------------------------------------
+
+ A local AI reads each candidate and confirms whether it's REALLY a
+ contraception/abortion product -- filtering out the false positives.
+
+ Each listing gets a verdict, a category, a confidence, and a one-line reason.
+ Results are cached, so reruns are fast.
+
+
+--------------------------------------------------------------------------------
+ SLIDE 7 - PUBLISH + CHART  (push_to_sheets.py, build_category_share.py)
+--------------------------------------------------------------------------------
+
+ SHEETS: write the listings to a Google Sheet -- two tabs, keyword-only and
+ LLM-approved, so you can compare them.
+
+ CHART: a donut chart showing what share of all scraped products are confirmed
+ contraception/abortion listings.
+
+
+--------------------------------------------------------------------------------
+ SLIDE 8 - THE KEY IDEA
+--------------------------------------------------------------------------------
+
+ Cast a wide net cheaply (keywords), then verify accurately (LLM).
+
+ You get broad coverage AND high precision -- the final list is small but reliable.
+
+================================================================================
