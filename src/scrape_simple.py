@@ -282,7 +282,7 @@ def _looks_like_ddos_block(html):
     return any(w in low for w in ('ddos protection', 'new tor identity', 'kill switch'))
 
 
-def fetch_page_html_browser(driver, url, settle=3.0, retries=5, manual=False):
+def fetch_page_html_browser(driver, url, settle=3.0, retries=5, manual=False, block_check=None):
     """Fetch a page through the live Selenium browser (carries JS cookies/tokens),
     returning driver.page_source. Used for markets that reject deep pagination over
     the plain requests session and redirect to the homepage or throw a CAPTCHA.
@@ -292,9 +292,19 @@ def fetch_page_html_browser(driver, url, settle=3.0, retries=5, manual=False):
     cases pause so the operator can re-solve / re-auth in the open browser; solving
     once unlocks the next run of pages.
 
+    `block_check(html) -> bool` overrides how we decide a page is an anti-bot/CAPTCHA
+    challenge (default: _looks_like_captcha/_bounce/_ddos_block). Sites whose NORMAL
+    pages contain the word "captcha" (e.g. the Dread forum's login/report widgets)
+    pass a stricter check so a good page isn't mis-flagged into an endless manual
+    re-prompt loop.
+
     NOT thread-safe (one WebDriver), so only the serialized category-page path may
     call it -- never the product worker threads.
     """
+    def _default_block(h):
+        return _looks_like_captcha(h) or _looks_like_bounce(h) or _looks_like_ddos_block(h)
+    is_blocked = block_check or _default_block
+
     html = None
     for attempt in range(retries):
         try:
@@ -325,8 +335,7 @@ def fetch_page_html_browser(driver, url, settle=3.0, retries=5, manual=False):
         except Exception:
             html = None
 
-        if (html and not _looks_like_captcha(html) and not _looks_like_bounce(html)
-                and not _looks_like_ddos_block(html)):
+        if html and not is_blocked(html):
             return html  # got the real page
 
         # No usable content this attempt (client timeout / blank page) → retry.

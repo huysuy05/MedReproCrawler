@@ -32,6 +32,15 @@ naming as scrape_simple.py, so the existing pipeline picks it up with no changes
     python3 src/parser.py
     python3 src/filter_medicines.py
     python3 src/push_to_sheets.py
+
+FORUM mode (--forum, see FORUMS registry; Dread first):
+  Same per-term crawl loop, but for a forum's keyword search. It reads the result
+  count, follows each matched comment's conversation (post) link, and fetches that
+  page. Output is routed to forum-specific files (NOT the product pipeline):
+    - data/raw/forum_posts_<timestamp>.json      : raw HTML of each conversation
+    - data/raw/forum_search_report_<timestamp>.json : per-term {count, conversation_urls, category}
+
+    python3 src/scrape_search.py --forum dread --manual --socks --socks-port 9150 --insecure
 """
 
 import argparse
@@ -73,6 +82,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 KEYWORDS_FILE = DATA_DIR / "config" / "search_keywords.json"
 PRODUCTS_HTML_FILE = DATA_DIR / "raw" / "products_html.json"
+# Forum runs (--forum) write here instead of products_html so the product pipeline
+# (parser.py) never picks them up: conversation page HTML and the per-term report.
+FORUM_POSTS_FILE = DATA_DIR / "raw" / "forum_posts.json"
+FORUM_REPORT_FILE = DATA_DIR / "raw" / "forum_search_report.json"
 # Resume checkpoint: which terms have already been fully searched, PER MARKET, so
 # reruns pick up where the last run left off instead of re-searching everything.
 PROGRESS_FILE = DATA_DIR / "search_progress.json"
@@ -167,6 +180,79 @@ def parse_count_woocommerce(html):
     return None
 
 
+def parse_count_dread(html):
+    """Result count for the Dread forum's search page.
+
+    Dread renders the tally in `<div class="searchamount"><div>Exactly
+    <strong>5</strong> results</div></div>`. We read that block's text and pull
+    the first number before "result(s)" (handles "Exactly N results" and a plain
+    "N results"). A no/zero-results phrasing → 0. If the block is absent we return
+    None (unknown → retry next run), matching the other count parsers' contract.
+    """
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    el = soup.select_one("div.searchamount")
+    if not el:
+        return None
+    text = " ".join(el.get_text(" ").split())
+    low = text.lower()
+    m = re.search(r"([\d,]+)\s+results?", low)
+    if m:
+        return int(m.group(1).replace(",", ""))
+    # Block present but no number → treat explicit "no results" as 0, else unknown.
+    if "no result" in low or "0 result" in low:
+        return 0
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Per-market link extractors (default: extract_product_links from scrape_simple)
+# --------------------------------------------------------------------------- #
+
+def extract_dread_post_links(html, base_url):
+    """Extract conversation (post) URLs from a Dread search-results page.
+
+    Each matched comment is shown with `<div class="post-title">Commented on:
+    <a href="/post/<id>/#c-<comment>">...</a></div>`. We take those anchors,
+    resolve them against `base_url`, strip the `#c-...` fragment (so the same
+    conversation linked from several matched comments is fetched once), and dedupe.
+    Returns a list, mirroring extract_product_links' shape.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    links = []
+    seen = set()
+    for a in soup.select("div.post-title a[href]"):
+        href = a.get("href")
+        if not href:
+            continue
+        full = urllib.parse.urljoin(base_url, href)
+        full, _, _ = full.partition("#")  # drop the #c-<comment> fragment
+        if full and full not in seen:
+            seen.add(full)
+            links.append(full)
+    return links
+
+
+def dread_block_check(html):
+    """Anti-bot detector for Dread (overrides the generic browser-fetch check).
+
+    Dread's normal logged-in pages contain the word "captcha" (login/report/registration
+    widgets), so the generic _looks_like_captcha would flag every good page and, in
+    --manual mode, loop forever asking the operator to "solve the CAPTCHA". Dread shows
+    no interstitial CAPTCHA during normal browsing, so we only treat a page as blocked
+    when it is genuinely empty/stub or its <title> is itself the challenge (a real
+    CAPTCHA/anti-DDoS interstitial titles itself that way). A bad fetch is otherwise
+    caught downstream: parse_count_dread returns None on a non-results page → the term
+    is retried next run rather than mis-saved.
+    """
+    if not html or len(html) < 500:
+        return True
+    low = html.lower()
+    title = low.split("</title>")[0] if "<title" in low else ""
+    return any(w in title for w in ("captcha", "ddos", "just a moment", "checking your browser"))
+
+
 # --------------------------------------------------------------------------- #
 # Per-market search-URL builders
 # --------------------------------------------------------------------------- #
@@ -240,6 +326,16 @@ def _wethenorth_search_url(base, term, page):
     return url
 
 
+def _dread_search_url(base, term, page):
+    # Dread forum search, scoped to the DNMSourcing subdread (hardcoded). Pagination
+    # param (&page=N) is an assumption — verify on first live run; the repeat-page
+    # guard in crawl_search_term stops safely if it's wrong.
+    url = f"{base}/search/?q={urllib.parse.quote(term)}&sub=DNMSourcing"
+    if page > 1:
+        url += f"&page={page}"
+    return url
+
+
 def _abacus_search_url(base, term, page):
     # Custom market advanced search: term goes in s_terms, all other filter params
     # kept verbatim (s_stock=1 = in-stock only). Pagination param assumed (&page=N).
@@ -287,6 +383,15 @@ class Market:
     # For count-less markets: a substring present on every valid search page, used
     # to confirm a 0-link page is genuinely empty (not blank/blocked). Optional.
     valid_page_marker: Optional[str] = None
+    # How to pull result links from a search page. None → the default
+    # extract_product_links (market product cards). Forums override this to pull
+    # conversation/post links instead (e.g. extract_dread_post_links).
+    link_extractor: Optional[Callable[[str, str], list]] = None
+    # Override for the browser fetch's "is this page an anti-bot challenge?" check.
+    # None → the default _looks_like_captcha/bounce/ddos combo. Needed by sites whose
+    # NORMAL pages contain the word "captcha" (e.g. Dread), which the default
+    # mis-flags into an endless manual re-prompt loop.
+    block_check: Optional[Callable[[str], bool]] = None
     # Fetch product pages through the live browser instead of the requests session.
     # Needed for markets that drop/anti-bot the plain requests session (e.g.
     # Carthasis: RemoteDisconnected on /item/ pages). Forces sequential fetching.
@@ -388,6 +493,24 @@ MARKETS = {
 }
 
 
+# Forums reuse the exact same per-term crawl loop as markets; they only differ in
+# the search-URL shape, the result-count parser, and how result links are pulled
+# from the page. Kept in a separate registry so forum runs route to forum-specific
+# output files (the product pipeline never reads them).
+FORUMS = {
+    "dread": Market(
+        key="dread",
+        name="Dread Forum (DNMSourcing)",
+        base="https://dreadytofatroptsdj6io7l3xptbet6onoyno2yv7jicoxknyazubrad.onion",
+        search_url=_dread_search_url,        # /search/?q=<term>&sub=DNMSourcing
+        count_parser=parse_count_dread,      # <div class="searchamount"> ... N results
+        link_extractor=extract_dread_post_links,  # <div class="post-title"> post links
+        block_check=dread_block_check,       # avoid false CAPTCHA loop on normal Dread pages
+        browser_products=True,  # conversation pages need the live browser session
+    ),
+}
+
+
 def load_search_terms(path):
     """Load every keyword from search_keywords.json into one flat, deduped list.
 
@@ -410,6 +533,25 @@ def load_search_terms(path):
                 seen.add(key)
                 terms.append(term)
     return terms
+
+
+def load_term_categories(path):
+    """Map each keyword to its category (group name) from the keywords JSON.
+
+    Mirrors load_search_terms' dedup: the first group a term appears in wins, and
+    keys are case-insensitive. Used to tag forum report rows with their category
+    (e.g. "contraception" / "abortion").
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    mapping = {}
+    if isinstance(data, dict):
+        for category, group_terms in data.items():
+            for term in group_terms:
+                key = str(term).strip().lower()
+                if key and key not in mapping:
+                    mapping[key] = category
+    return mapping
 
 
 def load_progress(path):
@@ -450,13 +592,17 @@ def save_progress(path, progress):
         print(colored(f"⚠️  Could not write progress file {path}: {exc}", "yellow"))
 
 
-def crawl_search_term(driver, session, market, term, args, scraped_urls, all_products):
+def crawl_search_term(driver, session, market, term, args, scraped_urls, all_products, report=None):
     """Crawl every listing returned for a single search `term` on `market`.
 
     Returns True if the term was fully searched (so it can be checkpointed as
     done), False if it stopped early for a reason worth retrying next run -- a
     fetch/CAPTCHA failure, an unreadable count, the global --max-products cap, or
     a count>0 page that yielded no links (likely a selector issue).
+
+    `report`, when given (forum runs), is a list this appends one row per term to:
+    {"term", "count", "conversation_urls"}. The row is created once the count is
+    read and its URLs accumulate across result pages.
     """
     print(colored(f"\n{'='*80}", "cyan"))
     print(colored(f"[{market.name}] SEARCH: {term!r}", "cyan", attrs=["bold"]))
@@ -465,13 +611,15 @@ def crawl_search_term(driver, session, market, term, args, scraped_urls, all_pro
     walk_prev_sig = None
     page = 1
     count = None
+    report_entry = None
     use_browser_products = args.browser_products or market.browser_products
 
     while page <= WALK_PAGE_CAP:
         search_page_url = market.search_url(market.base, term, page)
         # Browser fetch carries JS cookies/tokens and is where the operator solves
         # any CAPTCHA for THIS search (manual pause inside fetch_page_html_browser).
-        html = fetch_page_html_browser(driver, search_page_url, manual=args.manual)
+        html = fetch_page_html_browser(driver, search_page_url, manual=args.manual,
+                                       block_check=market.block_check)
         if not html:
             print(colored(f"❌ Failed to fetch search page {page} for {term!r}", "red"))
             return False  # transient → retry next run
@@ -483,12 +631,20 @@ def crawl_search_term(driver, session, market, term, args, scraped_urls, all_pro
                 print(colored(f"   ⚠️  Could not read a result count for {term!r} — will retry next run.", "yellow"))
                 return False
             print(colored(f"   🔢 {count} result(s) reported for {term!r}", "green", attrs=["bold"]))
+            if report is not None:
+                report_entry = {"term": term, "count": count, "conversation_urls": []}
+                report.append(report_entry)
             if count == 0:
                 print(colored("   ⏭️  0 results → nothing to crawl (done).", "yellow"))
                 return True  # genuinely no results → don't re-search
 
-        product_links = extract_product_links(html, search_page_url)
-        print(colored(f"   📄 Page {page}: found {len(product_links)} product link(s)", "blue"))
+        extract_links = market.link_extractor or extract_product_links
+        product_links = extract_links(html, search_page_url)
+        print(colored(f"   📄 Page {page}: found {len(product_links)} result link(s)", "blue"))
+        if report_entry is not None:
+            for link in product_links:
+                if link not in report_entry["conversation_urls"]:
+                    report_entry["conversation_urls"].append(link)
 
         # End-of-pagination detection (mirrors scrape_simple's forward walk):
         # stop on an empty page or one that repeats the previous page's link set.
@@ -529,7 +685,8 @@ def crawl_search_term(driver, session, market, term, args, scraped_urls, all_pro
                 # Browser carries the live session; needed where the requests
                 # session is dropped/anti-botted. driver is NOT thread-safe, so
                 # this path always runs sequentially (workers forced to 1 below).
-                html = fetch_page_html_browser(driver, p_url, manual=args.manual)
+                html = fetch_page_html_browser(driver, p_url, manual=args.manual,
+                                               block_check=market.block_check)
                 data = {
                     "market": market.host,
                     "category_page": search_page_url,
@@ -654,6 +811,11 @@ def parse_args():
                         help="Which market(s) to search: 'all', a single market key, or a "
                              "comma-separated list to run just those in order "
                              f"(e.g. prime,osiris,darkbay). Choices: {', '.join(MARKETS)}. Default: all")
+    parser.add_argument("--forum", default=None,
+                        help="Search FORUM(s) instead of markets: 'all', a single forum key, or a "
+                             "comma-separated list. When set, --market is ignored and output goes to "
+                             "forum_posts/forum_search_report files. "
+                             f"Choices: {', '.join(FORUMS)}.")
     # Shared with scrape_simple.py
     parser.add_argument("--manual", action="store_true",
                         help="Open browser and pause for manual CAPTCHA solving on each search")
@@ -700,17 +862,23 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.market == "all":
-        selected = list(MARKETS)
+    # Forum mode (--forum) and market mode share the same crawl loop but use
+    # different registries and output files. --forum takes precedence over --market.
+    forum_mode = args.forum is not None
+    registry = FORUMS if forum_mode else MARKETS
+    label = "forum" if forum_mode else "market"
+    selection = args.forum if forum_mode else args.market
+    if selection == "all":
+        selected = list(registry)
     else:
-        selected = [m.strip() for m in args.market.split(",") if m.strip()]
-        unknown = [m for m in selected if m not in MARKETS]
+        selected = [m.strip() for m in selection.split(",") if m.strip()]
+        unknown = [m for m in selected if m not in registry]
         if unknown:
-            print(colored(f"❌ Unknown market(s): {', '.join(unknown)}. "
-                          f"Valid: {', '.join(MARKETS)}, all", "red"))
+            print(colored(f"❌ Unknown {label}(s): {', '.join(unknown)}. "
+                          f"Valid: {', '.join(registry)}, all", "red"))
             return
 
-    # Resolve the term list (shared across markets).
+    # Resolve the term list (shared across markets/forums).
     if args.terms:
         all_terms = [t.strip() for t in args.terms.split(",") if t.strip()]
         print(colored(f"✅ Using {len(all_terms)} term(s) from --terms", "green"))
@@ -724,6 +892,11 @@ def main():
         print(colored("❌ No terms to search. Exiting.", "red"))
         return
 
+    # Forum mode tags each report row with the keyword's category (group name).
+    term_categories = {}
+    if forum_mode and args.keywords.exists():
+        term_categories = load_term_categories(args.keywords)
+
     # Resume checkpoint (per market). --restart clears only the selected markets.
     progress = load_progress(args.progress_file)
     if args.restart:
@@ -733,12 +906,19 @@ def main():
         print(colored(f"   --restart → cleared progress for: {', '.join(selected)}", "yellow"))
 
     run_timestamp = time.strftime("%Y%m%d_%H%M%S")
-    base_name, ext = os.path.splitext(PRODUCTS_HTML_FILE)
+    html_base = FORUM_POSTS_FILE if forum_mode else PRODUCTS_HTML_FILE
+    base_name, ext = os.path.splitext(html_base)
     output_file = f"{base_name}_{run_timestamp}{ext or '.json'}"
+    report_base, report_ext = os.path.splitext(FORUM_REPORT_FILE)
+    report_file = f"{report_base}_{run_timestamp}{report_ext or '.json'}"
+    # Forum runs accumulate one report row per term; None for market runs.
+    report = [] if forum_mode else None
 
     print(colored("\n🚀 Starting search crawl...", "cyan", attrs=["bold"]))
-    print(colored(f"   Markets: {', '.join(MARKETS[m].name for m in selected)}", "white"))
+    print(colored(f"   {label.capitalize()}s: {', '.join(registry[m].name for m in selected)}", "white"))
     print(colored(f"   Output: {output_file}", "white"))
+    if forum_mode:
+        print(colored(f"   Report: {report_file}", "white"))
     if args.insecure:
         print(colored("   WARNING: TLS verification disabled (--insecure)", "yellow"))
 
@@ -746,6 +926,29 @@ def main():
     all_products = []
     scraped_urls = set()  # shared dedup across markets (hosts differ, so no collisions)
     capped = False
+
+    def save_report():
+        """Persist the forum report (term → count + conversation URLs). No-op for markets."""
+        if report is None:
+            return
+        for row in report:
+            row.setdefault("category", term_categories.get(row["term"].lower()))
+        with_results = sum(1 for row in report if (row.get("count") or 0) > 0)
+        payload = {
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "forums": [registry[m].name for m in selected],
+            "terms_searched": len(report),
+            "terms_with_results": with_results,
+            "results": report,
+        }
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(report_file)), exist_ok=True)
+            with open(report_file, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+            print(colored(f"✅ Saved forum report ({with_results}/{len(report)} terms with results) "
+                          f"to {report_file}", "green"))
+        except Exception as exc:
+            print(colored(f"⚠️  Could not write forum report {report_file}: {exc}", "yellow"))
 
     try:
         options = build_firefox_options(
@@ -764,13 +967,13 @@ def main():
         _set_client_timeout(driver, args.page_timeout + 60)
 
         for market_key in selected:
-            market = MARKETS[market_key]
+            market = registry[market_key]
             done_list = list(progress.get(market_key, []))
             done_keys = {t.lower() for t in done_list}
             remaining = [t for t in all_terms if t.lower() not in done_keys]
 
             print(colored(f"\n{'#'*80}", "magenta"))
-            print(colored(f"MARKET: {market.name}", "magenta", attrs=["bold"]))
+            print(colored(f"{label.upper()}: {market.name}", "magenta", attrs=["bold"]))
             if done_keys:
                 print(colored(f"   ⏭️  Resuming: {len(all_terms) - len(remaining)} done, {len(remaining)} remaining", "cyan"))
             if args.limit_terms:
@@ -786,7 +989,8 @@ def main():
 
             for i, term in enumerate(remaining, 1):
                 print(colored(f"\n[{market.key} {i}/{len(remaining)}]", "white", attrs=["bold"]), end=" ")
-                completed = crawl_search_term(driver, session, market, term, args, scraped_urls, all_products)
+                completed = crawl_search_term(driver, session, market, term, args, scraped_urls,
+                                              all_products, report=report)
                 if completed:
                     # Checkpoint immediately so an interrupt/crash keeps this term done.
                     done_list.append(term)
@@ -804,15 +1008,18 @@ def main():
         print(colored("💾 SAVING RESULTS", "cyan", attrs=["bold"]))
         print(colored(f"{'='*80}", "cyan"))
         save_products_html(all_products, output_file, overwrite=True)
+        save_report()
         print(colored("\n✅ Search crawl complete!", "green", attrs=["bold"]))
-        print(colored(f"   Total products scraped: {len(all_products)}", "green"))
+        noun = "conversation pages" if forum_mode else "products"
+        print(colored(f"   Total {noun} scraped: {len(all_products)}", "green"))
         print(colored(f"   Saved to: {output_file}", "green"))
 
     except KeyboardInterrupt:
         print(colored("\n\n⚠️  Interrupted by user", "yellow"))
         if all_products:
-            print(colored(f"💾 Saving {len(all_products)} products collected so far...", "yellow"))
+            print(colored(f"💾 Saving {len(all_products)} pages collected so far...", "yellow"))
             save_products_html(all_products, output_file, overwrite=True)
+        save_report()
     except Exception as e:
         print(colored(f"\n❌ Error: {e}", "red"))
         import traceback
